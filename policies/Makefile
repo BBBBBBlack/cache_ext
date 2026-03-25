@@ -1,6 +1,6 @@
 # Define the compiler and the flags
 # See: https://stackoverflow.com/questions/76035116/cannot-use-ebpf-kptr-ref-feature
-CLANG ?= clang-14
+CLANG ?= clang
 BPFTOOL ?= /usr/local/sbin/bpftool #../../tools/bpf/bpftool/bpftool
 CFLAGS = -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -c -g -Wall
 USERSPACE_CFLAGS = -O2 -fsanitize=address -g -Wall
@@ -35,7 +35,8 @@ CLANG_BPF_SYS_INCLUDES ?= $(shell $(CLANG) -v -E - </dev/null 2>&1 \
 
 all: 	cache_ext_mru.out cache_ext_mglru.out cache_ext_fifo.out \
 		cache_ext_sampling.out cache_ext_get_scan.out cache_ext_s3fifo.out \
-		cache_ext_lhd.out   \
+		cache_ext_lhd.out a_dispatcher.out  \
+		a_user_loader.out \
 		# cache_ext_debug.out cache_ext_simple.out
 
 $(VMLINUX_H):
@@ -56,3 +57,6 @@ clean:
 	rm -f *.o *.out *.skel.h $(VMLINUX_H)
 
 .PHONY: all clean
+
+a_user_loader.out: a_user_loader.c a_fifo_policy.skel.h a_s3fifo_policy.skel.h
+	$(CLANG) $(USERSPACE_CFLAGS) $< -o $@ $(USERSPACE_LINKER_FLAGS)
