@@ -2,7 +2,7 @@
 # See: https://stackoverflow.com/questions/76035116/cannot-use-ebpf-kptr-ref-feature
 CLANG ?= clang
 BPFTOOL ?= /usr/local/sbin/bpftool #../../tools/bpf/bpftool/bpftool
-CFLAGS = -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -c -g -Wall
+CFLAGS = -O2 -target bpf -mcpu=v3 -D__TARGET_ARCH_$(ARCH) -c -g -Wall
 USERSPACE_CFLAGS = -O2 -fsanitize=address -g -Wall
 USERSPACE_LINKER_FLAGS = -L/usr/local/lib64 -lbpf
 

@@ -12,6 +12,10 @@
 
 char __license[] SEC("license") = "GPL";
 static volatile const u64 secret = 0x9876543210;
+
+/**
+ * ****************************************** INIT *******************************************
+ */
 static u64 main_list;
 
 static __always_inline int ensure_initialized_impl(u64 new_list)
@@ -22,7 +26,7 @@ static __always_inline int ensure_initialized_impl(u64 new_list)
     return -1;
   }
   // CAS
-  u64 old_val = __sync_val_compare_and_swap(&main_list, 0, new_list);
+  __sync_val_compare_and_swap(&main_list, 0, new_list);
   // if (old_val == 0)
   //   bpf_printk("FIFO init success, list id: %llu\n", new_list);
   // else
@@ -59,13 +63,111 @@ int do_targeted_init(struct bpf_iter__cgroup* ctx)
     bpf_printk("null memcg\n");
     return 0;
   }
-
   // 初始化
   bpf_printk("FIFO Loader Init\n");
   main_list = bpf_cache_ext_ds_registry_new_list(memcg);
 
   return 0;
 }
+
+static int fifo_push_cb(int idx, struct cache_ext_list_node* a)
+{
+  // bpf_printk("[FIFO] Enter node...\n");
+  u32 state_key = 0;
+  migration_qstate* qstate = bpf_map_lookup_elem(&migration_qstate_map, &state_key);
+  if (!qstate)
+    return CACHE_EXT_STOP_ITER;
+
+  u32 head = READ_ONCE(qstate->head);
+  u32 current_tail = READ_ONCE(qstate->tail);
+  if (current_tail - head >= MIGRATION_Q_SIZE)
+    return CACHE_EXT_STOP_ITER;
+
+  u64 handle = bpf_cache_ext_folio_to_handle(a->folio, secret);
+
+  u32 tail = __sync_fetch_and_add(&qstate->tail, 1);
+  u32 q_idx = tail & (MIGRATION_Q_SIZE - 1);
+  generic_cache_metrics metrics = {.handle = handle,
+                                   .seq = tail + 1};
+
+  long err = bpf_map_update_elem(&migration_queue, &q_idx, &metrics, BPF_ANY);
+
+  if (err)
+    return CACHE_EXT_STOP_ITER;
+  return CACHE_EXT_CONTINUE_ITER;
+}
+
+SEC("iter/cgroup")
+int trigger_push(struct bpf_iter__cgroup* ctx)
+{
+  struct cgroup* cgrp = ctx->cgroup;
+  if (!cgrp)
+    return 0;
+  struct mem_cgroup* memcg = bpf_cgroup_to_memcg(cgrp);
+  if (!memcg)
+    return 0;
+  if (!main_list)
+    return 0;
+
+  bpf_printk("[FIFO] Starting pipeline push for memcg...\n");
+  bpf_cache_ext_list_iterate_scan(memcg, main_list, fifo_push_cb);
+
+  return 0;
+}
+
+static __always_inline int __fifo_add_folio(struct folio* folio,
+                                            generic_cache_metrics* migrated_metrics)
+{
+  return 0;
+}
+
+SEC("syscall")
+int trigger_pull(void* ctx)
+{
+  // struct cgroup* cgrp = ctx->cgroup;
+  // if (!cgrp)
+  //   return 0;
+  // struct mem_cgroup* memcg = bpf_cgroup_to_memcg(cgrp);
+  // if (!memcg)
+  //   return 0;
+
+  u32 state_key = 0;
+  migration_qstate* qstate = bpf_map_lookup_elem(&migration_qstate_map, &state_key);
+  if (!qstate)
+    return 0;
+
+  bpf_printk("[FIFO] Received pull trigger from migration queue.\n");
+  int count = 0;
+
+  for (int i = 0; i < 1024; i++)
+  {
+    u32 head = READ_ONCE(qstate->head);
+    if (head == READ_ONCE(qstate->tail))
+      break;
+
+    u32 idx = head & (MIGRATION_Q_SIZE - 1);
+
+    generic_cache_metrics* m = bpf_map_lookup_elem(&migration_queue, &idx);
+    if (!m || m->seq != head + 1)
+      break;
+
+    // 必须将数据拷贝到本地栈，因为 Array 里的内存槽会被后续复用
+    generic_cache_metrics metrics = *m;
+
+    // 数据读取成功，原子移动 Head 指针 (完成 Pop 操作)
+    if (__sync_val_compare_and_swap(&qstate->head, head, head + 1) != head)
+      continue;
+
+    struct folio* f = bpf_cache_ext_handle_to_folio(metrics.handle, secret);
+    if (!f)
+      continue; // Folio 已死
+
+    if (__fifo_add_folio(f, &metrics) == 0)
+      count++;
+  }
+  return count;
+}
+// *********************************************************************************************
 
 static int bpf_fifo_evict_cb(int idx, struct cache_ext_list_node* a)
 {

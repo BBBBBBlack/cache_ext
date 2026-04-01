@@ -9,6 +9,11 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#include "a_uapi.h"
+
+#ifndef ENOTSUPP
+#define ENOTSUPP 524
+#endif
 // Generic
 
 #define BPF_STRUCT_OPS(name, args...) \
@@ -101,18 +106,21 @@ static __always_inline void __write_once_size(volatile void* p, void* res, int s
 
 // cache_ext BPF API
 
-struct cache_ext_val_buffer
-{
-  u8 raw_data[64];
-} __attribute__((preserve_access_index));
+// struct cache_ext_val_buffer
+// {
+//   u8 raw_data[64];
+// } __attribute__((preserve_access_index));
 
 int bpf_cache_ext_list_add(u64 list, struct folio* folio) __ksym;
 int bpf_cache_ext_list_add_tail(u64 list, struct folio* folio) __ksym;
 int bpf_cache_ext_list_del(struct folio* folio) __ksym;
 int bpf_cache_ext_list_move(u64 list, struct folio* folio, bool tail) __ksym;
+int bpf_cache_ext_list_iterate_scan(
+    struct mem_cgroup* memcg, u64 list,
+    int(iter_fn)(int idx, struct cache_ext_list_node* node)) __ksym;
 int bpf_cache_ext_list_iterate(struct mem_cgroup* memcg, u64 list,
                                int(iter_fn)(int idx, struct cache_ext_list_node* node),
-                               struct cache_ext_eviction_ctx* ctx) __ksym;
+                               struct cache_ext_eviction_ctx* ctx__opt) __ksym;
 int bpf_cache_ext_list_iterate_extended(struct mem_cgroup* memcg, u64 list,
                                         int(iter_fn)(int idx, struct cache_ext_list_node* node),
                                         struct cache_ext_iterate_opts* opts,
@@ -142,6 +150,29 @@ long long bpf_cache_ext_map_inc(struct bpf_map* map, void* key, u32 key__sz,
                                 u32 offset, long long max_limit) __ksym;
 long long bpf_cache_ext_map_dec(struct bpf_map* map, void* key, u32 key__sz,
                                 u32 offset, long long min_limit) __ksym;
+
+#define META_HAS_FREQ (1U << 0)        // 包含频率信息
+#define META_HAS_LAST_ACCESS (1U << 1) // 包含最后访问时间戳
+#define META_HAS_INSERT_TIME (1U << 2) // 包含首次插入时间戳
+
+typedef struct generic_cache_metrics_uapi generic_cache_metrics;
+typedef struct migration_qstate_uapi migration_qstate;
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, MIGRATION_Q_SIZE);
+  __type(key, u32);
+  __type(value, generic_cache_metrics);
+} migration_queue SEC(".maps");
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, u32);
+  __type(value, migration_qstate);
+} migration_qstate_map SEC(".maps");
 
 #define BITS_PER_LONG 64
 #define BIT_MASK(nr) (UL(1) << ((nr) % BITS_PER_LONG))
