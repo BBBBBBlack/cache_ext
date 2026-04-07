@@ -1,0 +1,31 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "内存回收",
+  "steps": [
+    {
+      "file": "linux/mm/vmscan.c",
+      "description": "",
+      "line": 6701
+    },
+    {
+      "file": "linux/mm/vmscan.c",
+      "description": "调用evict_folios，获取要evict的folios——ctx.folios_to_evict",
+      "line": 6653
+    },
+    {
+      "file": "linux/mm/vmscan.c",
+      "description": "内存回收函数",
+      "line": 6714
+    },
+    {
+      "file": "linux/mm/vmscan.c",
+      "description": "",
+      "line": 6637
+    },
+    {
+      "file": "linux/mm/vmscan.c",
+      "description": "开始清除folio\n",
+      "line": 2931
+    }
+  ]
+}

@@ -149,6 +149,10 @@ int do_targeted_init(struct bpf_iter__cgroup* ctx)
   return 0;
 }
 
+/**
+ * ****************************************** MIGRATION *******************************************
+ */
+
 static int s3fifo_push_cb(int idx, struct cache_ext_list_node* a)
 {
   u32 state_key = 0;
@@ -192,9 +196,34 @@ int trigger_push(struct bpf_iter__cgroup* ctx)
   return 0;
 }
 
-static __always_inline int __s3fifo_add_folio(struct folio* folio,
-                                              generic_cache_metrics* migrated_metrics)
+// TODO： 处理页面被old policy驱逐后，迁移回新policy的情况
+// 兼容 FIFO(仅存活时间), LRU(有最近访问时间), LFU/ARC(有真实频次)
+static __always_inline int
+__s3fifo_add_folio(struct folio* folio,
+                   generic_cache_metrics* migrated_metrics)
 {
+  if (!migrated_metrics || ensure_initialized_by_folio(folio) < 0)
+    return -1;
+  if (!folio->mapping || folio_in_ghost(folio))
+    return 0;
+
+  u64 key = (u64)folio;
+  struct folio_metadata new_meta = {0};
+  u64 list_to_add;
+
+  new_meta.freq = (migrated_metrics->freq >= 3) ? 3 : migrated_metrics->freq;
+  new_meta.in_main = true;
+  list_to_add = main_list;
+
+  if (bpf_map_update_elem((struct bpf_map*)&folio_metadata_map, &key, &new_meta, BPF_NOEXIST))
+    return 0;
+  if (bpf_cache_ext_list_add_tail(list_to_add, folio))
+  {
+    bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
+    return -1;
+  }
+  __sync_fetch_and_add(&main_list_size, 1);
+
   return 0;
 }
 
@@ -218,8 +247,8 @@ int trigger_pull(void* ctx)
 
   for (int i = 0; i < 1024; i++)
   {
-    bpf_printk("Pull loop iteration %d: head=%u, tail=%u\n",
-               i, READ_ONCE(qstate->head), READ_ONCE(qstate->tail));
+    // bpf_printk("Pull loop iteration %d: head=%u, tail=%u\n",
+    //            i, READ_ONCE(qstate->head), READ_ONCE(qstate->tail));
 
     u32 head = READ_ONCE(qstate->head);
     if (head == READ_ONCE(qstate->tail))
@@ -239,15 +268,18 @@ int trigger_pull(void* ctx)
       continue;
 
     struct folio* f = bpf_cache_ext_handle_to_folio(metrics.handle, secret);
-    if (!f)
-      continue; // Folio 已死
-
-    // 防重入校验：如果实时流已经处理过
-    struct folio_metadata* existing_data = get_folio_metadata(f);
-    if (existing_data)
-      // 可选：将迁移流带过来的历史 freq 累加到现有的实时数据上
-      // __sync_fetch_and_add(&existing_data->freq, metrics.freq);
+    if (!f || !f->mapping)
       continue;
+
+    struct folio_metadata* existing_data = get_folio_metadata(f);
+    // TODO: 有改进空间
+    if (existing_data)
+    {
+      u64 key = (u64)f;
+      bpf_cache_ext_map_inc((struct bpf_map*)&folio_metadata_map, &key, sizeof(key),
+                            __builtin_offsetof(struct folio_metadata, freq), 3);
+      continue;
+    }
 
     if (__s3fifo_add_folio(f, &metrics) == 0)
       count++;
@@ -488,17 +520,18 @@ int s3fifo_folio_added(u64 handle)
   };
 
   u64 list_to_add;
+  bool is_main = false;
+
   if (folio_in_ghost(folio))
   {
     list_to_add = main_list;
     new_meta.in_main = true;
-    __sync_fetch_and_add(&main_list_size, 1);
+    is_main = true;
   }
   else
   {
     list_to_add = small_list;
     new_meta.in_main = false;
-    __sync_fetch_and_add(&small_list_size, 1);
   }
 
   if (bpf_cache_ext_list_add_tail(list_to_add, folio))
@@ -516,6 +549,11 @@ int s3fifo_folio_added(u64 handle)
     // bpf_printk("cache_ext: added: Failed to create folio metadata\n");
     return -1;
   }
+
+  if (is_main)
+    __sync_fetch_and_add(&main_list_size, 1);
+  else
+    __sync_fetch_and_add(&small_list_size, 1);
   call_count += 1;
   return 0;
 }

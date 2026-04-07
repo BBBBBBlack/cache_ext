@@ -166,55 +166,6 @@ struct policy_driver
   } maps;
 };
 
-// static int create_shared_migration_maps(int* out_qstate_fd, int* out_queue_fd)
-// {
-//   if (!out_qstate_fd || !out_queue_fd)
-//     return -1;
-//   *out_qstate_fd = -1;
-//   *out_queue_fd = -1;
-//   LIBBPF_OPTS(bpf_map_create_opts, qstate_opts);
-//   int qstate_fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, "shared_qstate",
-//                                  sizeof(u32), sizeof(struct migration_qstate_uapi),
-//                                  1, &qstate_opts);
-//   if (qstate_fd < 0)
-//   {
-//     fprintf(stderr, "Failed to create shared qstate map: %s\n", strerror(errno));
-//     return -1;
-//   }
-//   LIBBPF_OPTS(bpf_map_create_opts, queue_opts);
-//   int queue_fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, "shared_queue",
-//                                 sizeof(u32), sizeof(struct generic_cache_metrics_uapi),
-//                                 MIGRATION_Q_SIZE, &queue_opts);
-//   if (queue_fd < 0)
-//   {
-//     fprintf(stderr, "Failed to create shared queue map: %s\n", strerror(errno));
-//     close(qstate_fd);
-//     return -1;
-//   }
-//   *out_qstate_fd = qstate_fd;
-//   *out_queue_fd = queue_fd;
-//   return 0;
-// }
-
-// static int reuse_shared_migration_maps(struct policy_driver* policy,
-//                                        int shared_qstate_fd,
-//                                        int shared_queue_fd)
-// {
-//   if (!policy || !policy->maps.migration_qstate_map || !policy->maps.migration_queue)
-//     return -1;
-//   if (bpf_map__reuse_fd(policy->maps.migration_qstate_map, shared_qstate_fd) < 0)
-//   {
-//     fprintf(stderr, "Failed to reuse migration_qstate_map fd\n");
-//     return -1;
-//   }
-//   if (bpf_map__reuse_fd(policy->maps.migration_queue, shared_queue_fd) < 0)
-//   {
-//     fprintf(stderr, "Failed to reuse migration_queue fd\n");
-//     return -1;
-//   }
-//   return 0;
-// }
-
 static int wrap_fifo_load(struct policy_driver* driver)
 {
   return a_fifo_policy_bpf__load(driver->skel.fifo);
@@ -484,10 +435,7 @@ int main(int argc, char** argv)
     fprintf(stderr, "Error: Failed to initialize selected policy skeleton.\n");
     goto cleanup;
   }
-  // if (create_shared_migration_maps(&shared_qstate_fd, &shared_queue_fd) < 0)
-  //   goto cleanup;
-  // if (reuse_shared_migration_maps(&old_policy, shared_qstate_fd, shared_queue_fd) < 0)
-  //   goto cleanup;
+
   if (prepare_slot_hooks(&old_policy, &fds, 1) < 0)
     goto cleanup;
 
@@ -521,8 +469,6 @@ int main(int argc, char** argv)
     fprintf(stderr, "Error: Failed to reuse shared maps for new policy.\n");
     goto cleanup;
   }
-  // if (reuse_shared_migration_maps(&new_policy, shared_qstate_fd, shared_queue_fd) < 0)
-  // goto cleanup;
 
   if (prepare_slot_hooks(&new_policy, &fds, 2) < 0)
     goto cleanup;

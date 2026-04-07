@@ -70,9 +70,12 @@ int do_targeted_init(struct bpf_iter__cgroup* ctx)
   return 0;
 }
 
+/**
+ * ****************************************** MIGRATION *******************************************
+ */
+
 static int fifo_push_cb(int idx, struct cache_ext_list_node* a)
 {
-  // bpf_printk("[FIFO] Enter node...\n");
   u32 state_key = 0;
   migration_qstate* qstate = bpf_map_lookup_elem(&migration_qstate_map, &state_key);
   if (!qstate)
@@ -91,7 +94,6 @@ static int fifo_push_cb(int idx, struct cache_ext_list_node* a)
                                    .seq = tail + 1};
 
   long err = bpf_map_update_elem(&migration_queue, &q_idx, &metrics, BPF_ANY);
-
   if (err)
     return CACHE_EXT_STOP_ITER;
   return CACHE_EXT_CONTINUE_ITER;
@@ -115,8 +117,9 @@ int trigger_push(struct bpf_iter__cgroup* ctx)
   return 0;
 }
 
-static __always_inline int __fifo_add_folio(struct folio* folio,
-                                            generic_cache_metrics* migrated_metrics)
+static __always_inline int
+__fifo_add_folio(struct folio* folio,
+                 generic_cache_metrics* migrated_metrics)
 {
   return 0;
 }

@@ -3,13 +3,13 @@ set -eu -o pipefail
 
 # Install Linux build dependencies
 echo "Installing dependencies..."
-sudo apt-get update
-sudo apt-get install -y build-essential bc bison flex rsync libelf-dev \
-			libssl-dev libncurses-dev dwarves clang lld \
-			llvm python3 python3-pip
+# sudo apt-get update
+# sudo apt-get install -y build-essential bc bison flex rsync libelf-dev \
+# 			libssl-dev libncurses-dev dwarves lld \
+# 			python3 python3-pip
 
 # Kernel build.py script dependencies
-pip3 install yanniszark_common
+# pip3 install yanniszark_common
 
 SCRIPT_PATH=$(realpath $0)
 BASE_DIR=$(dirname $SCRIPT_PATH)
@@ -21,7 +21,7 @@ if [[ ! -e "Makefile" ]]; then
 fi
 
 # Clean previous builds
-make distclean
+# make distclean
 
 echo "Configuring kernel..."
 make olddefconfig

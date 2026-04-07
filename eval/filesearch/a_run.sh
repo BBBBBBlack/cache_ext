@@ -12,7 +12,7 @@ BASE_DIR=$(realpath "$(dirname $SCRIPT_PATH)/../../")
 BENCH_PATH="$BASE_DIR/bench"
 POLICY_PATH="$BASE_DIR/policies"
 # FILES_PATH=$(realpath "$BASE_DIR/../ghost-kernel")
-FILES_PATH=$(realpath "$BASE_DIR/linux/arch/x86/boot/compressed/")
+FILES_PATH=$(realpath "$BASE_DIR/linux/drivers/gpu/")
 RESULTS_PATH="$BASE_DIR/results"
 
 ITERATIONS=3
