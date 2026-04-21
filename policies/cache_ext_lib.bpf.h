@@ -139,6 +139,7 @@ struct folio* bpf_cache_ext_handle_to_folio(u64 handle, u64 secret_key) __ksym;
 struct mem_cgroup* bpf_cache_ext_handle_to_memcg(u64 handle, u64 secret_key) __ksym;
 struct cache_ext_eviction_ctx* bpf_cache_ext_handle_to_ctx(u64 handle, u64 secret_key) __ksym;
 struct mem_cgroup* bpf_cgroup_to_memcg(struct cgroup* cgrp) __ksym;
+struct mem_cgroup* bpf_cache_ext_folio_to_memcg(struct folio* folio) __ksym;
 int bpf_cache_ext_map_update(struct bpf_map* map,
                              void* key, u32 key__sz, void* value, u32 value__sz) __ksym;
 int bpf_cache_ext_map_delete(struct bpf_map* map, void* key, u32 key__sz) __ksym;

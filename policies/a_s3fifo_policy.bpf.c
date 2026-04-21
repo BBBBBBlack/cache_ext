@@ -204,6 +204,7 @@ __s3fifo_add_folio(struct folio* folio,
 {
   if (!migrated_metrics || ensure_initialized_by_folio(folio) < 0)
     return -1;
+
   if (!folio->mapping || folio_in_ghost(folio))
     return 0;
 
@@ -217,11 +218,14 @@ __s3fifo_add_folio(struct folio* folio,
 
   if (bpf_map_update_elem((struct bpf_map*)&folio_metadata_map, &key, &new_meta, BPF_NOEXIST))
     return 0;
-  if (bpf_cache_ext_list_add_tail(list_to_add, folio))
+
+  int ret = bpf_cache_ext_list_add_tail(list_to_add, folio);
+  if (ret)
   {
     bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
     return -1;
   }
+
   __sync_fetch_and_add(&main_list_size, 1);
 
   return 0;
@@ -247,9 +251,6 @@ int trigger_pull(void* ctx)
 
   for (int i = 0; i < 1024; i++)
   {
-    // bpf_printk("Pull loop iteration %d: head=%u, tail=%u\n",
-    //            i, READ_ONCE(qstate->head), READ_ONCE(qstate->tail));
-
     u32 head = READ_ONCE(qstate->head);
     if (head == READ_ONCE(qstate->tail))
       break;
@@ -281,8 +282,12 @@ int trigger_pull(void* ctx)
       continue;
     }
 
+    // bpf_printk("Checking migration queue: head=%u, tail=%u\n",
+    //            READ_ONCE(qstate->head), READ_ONCE(qstate->tail));
     if (__s3fifo_add_folio(f, &metrics) == 0)
+    {
       count++;
+    }
   }
   return count;
 }

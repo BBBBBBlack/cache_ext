@@ -121,6 +121,12 @@ static __always_inline int
 __fifo_add_folio(struct folio* folio,
                  generic_cache_metrics* migrated_metrics)
 {
+  if (!migrated_metrics || ensure_initialized_by_folio(folio) < 0)
+    return -1;
+  if (!folio->mapping)
+    return 0;
+  if (bpf_cache_ext_list_add_tail(main_list, folio))
+    return -1;
   return 0;
 }
 
@@ -165,8 +171,13 @@ int trigger_pull(void* ctx)
     if (!f)
       continue; // Folio 已死
 
+    // bpf_printk("Checking migration queue: head=%u, tail=%u\n",
+    //            READ_ONCE(qstate->head), READ_ONCE(qstate->tail));
     if (__fifo_add_folio(f, &metrics) == 0)
+    {
+
       count++;
+    }
   }
   return count;
 }

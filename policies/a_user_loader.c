@@ -3,13 +3,15 @@
 // #include "vmlinux.h"
 #include <bpf/libbpf.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
-// #include "a_uapi.h"
 #include "logger.h"
 
 typedef unsigned long long u64;
@@ -19,6 +21,12 @@ typedef unsigned int u32;
 #include "a_s3fifo_policy.skel.h"
 
 #define REGISTRY_MAP_PATH "/sys/fs/bpf/dispatcher_registry"
+#define DISPATCHER_CONTROL_SOCKET_PATH "/tmp/cache_ext_dispatcher_%llu.sock"
+#define LOADER_CONTROL_SOCKET_PATH "/tmp/cache_ext_loader_%llu.sock"
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #ifndef BPF_CGROUP_ITER_SELF_ONLY
 enum bpf_cgroup_iter_order
@@ -231,6 +239,124 @@ int select_skel(struct policy_driver* driver, enum policy_type type)
   return 0;
 }
 
+/**
+ * ******************************************通知dispatcher*******************************************
+ */
+
+struct loader_server
+{
+  int listen_fd;
+  __u64 cgroup_id;
+  char socket_path[PATH_MAX];
+};
+
+static int notify_dispatcher_command(__u64 cgroup_id, const char* msg)
+{
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  struct sockaddr_un addr;
+  char cmd_socket_path[108];
+
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+
+  snprintf(cmd_socket_path, sizeof(cmd_socket_path),
+           DISPATCHER_CONTROL_SOCKET_PATH, cgroup_id);
+  strncpy(addr.sun_path, cmd_socket_path, sizeof(addr.sun_path) - 1);
+
+  int ret = -1;
+  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+  {
+    write(fd, msg, strlen(msg));
+    ret = 0;
+  }
+  else
+    perror("Failed to connect to Dispatcher socket");
+
+  close(fd);
+  return ret;
+}
+
+static int build_server(struct loader_server* server, __u64 cgroup_id)
+{
+  memset(server, 0, sizeof(*server));
+  server->listen_fd = -1;
+  server->cgroup_id = cgroup_id;
+
+  server->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (server->listen_fd < 0)
+  {
+    perror("Failed to create loader control socket");
+    return -1;
+  }
+
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+
+  snprintf(server->socket_path, sizeof(server->socket_path),
+           LOADER_CONTROL_SOCKET_PATH, cgroup_id);
+  unlink(server->socket_path);
+  strncpy(addr.sun_path, server->socket_path, sizeof(addr.sun_path) - 1);
+
+  if (bind(server->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+  {
+    perror("Failed to bind loader control socket");
+    close(server->listen_fd);
+    server->listen_fd = -1;
+    return -1;
+  }
+
+  if (listen(server->listen_fd, 1) < 0)
+  {
+    perror("Failed to listen on loader control socket");
+    close(server->listen_fd);
+    server->listen_fd = -1;
+    return -1;
+  }
+
+  return 0;
+}
+
+static void destroy_server(struct loader_server* server)
+{
+  if (!server)
+    return;
+
+  if (server->listen_fd >= 0)
+    close(server->listen_fd);
+  if (server->socket_path[0] != '\0')
+    unlink(server->socket_path);
+}
+
+static int wait_dispatcher(const struct loader_server* server)
+{
+  int conn_fd = accept(server->listen_fd, NULL, NULL);
+  if (conn_fd < 0)
+  {
+    perror("Failed to accept dispatcher control connection");
+    return -1;
+  }
+
+  char buf[128];
+  ssize_t n = read(conn_fd, buf, sizeof(buf) - 1);
+  close(conn_fd);
+  if (n <= 0)
+  {
+    perror("Failed to read dispatcher control message");
+    return -1;
+  }
+
+  buf[n] = '\0';
+  if (strcmp(buf, "MIGRATION_COMPLETE") != 0)
+  {
+    fprintf(stderr, "Unexpected dispatcher control message: %s\n", buf);
+    return -1;
+  }
+
+  printf("[Loader] Received MIGRATION_COMPLETE from dispatcher.\n");
+  return 0;
+}
+
 // *********************************************************************************************
 
 struct dispatcher_prog_ids
@@ -396,12 +522,47 @@ static int trigger_cgroup_iterator(const char* cgroup_path, struct bpf_program* 
   return ret;
 }
 
+static int run_state_migration_round(const char* cgroup_path,
+                                     struct bpf_program* push_prog,
+                                     struct bpf_program* pull_prog,
+                                     const char* phase_name)
+{
+  printf("[%s] Starting asynchronous state migration...\n", phase_name);
+  if (trigger_cgroup_iterator(cgroup_path, push_prog) < 0)
+  {
+    fprintf(stderr, "[%s] Failed to execute migration pipeline.\n", phase_name);
+    return -1;
+  }
+
+  int total_pulled = 0;
+  while (1)
+  {
+    int count = trigger_syscall_prog(pull_prog);
+
+    if (count < 0)
+    {
+      fprintf(stderr, "[%s] Error occurred during data pull.\n", phase_name);
+      return -1;
+    }
+    if (count == 0)
+      break;
+
+    total_pulled += count;
+    printf("[%s] Pulled %d folios (Total: %d)...\n",
+           phase_name, count, total_pulled);
+  }
+
+  printf("[%s] Migration round completed. total=%d\n", phase_name, total_pulled);
+  return 0;
+}
+
 int main(int argc, char** argv)
 {
   struct cmdline_args args = {0};
   int ret = 1;
   int shared_qstate_fd = -1;
   int shared_queue_fd = -1;
+  struct loader_server loader_server = {.listen_fd = -1};
 
   if (argp_parse(&argp, argc, argv, 0, 0, &args))
     return 1;
@@ -422,6 +583,13 @@ int main(int argc, char** argv)
 
   // 查找内核中 Dispatcher 的主入口名称
   __u64 target_cgroup_id = st.st_ino;
+
+  if (build_server(&loader_server, target_cgroup_id) < 0)
+  {
+    fprintf(stderr, "Failed to build loader control server.\n");
+    goto cleanup;
+  }
+
   struct dispatcher_prog_fds fds = {-1, -1, -1, -1};
   if (get_dispatcher_fd_from_registry(
           target_cgroup_id, args.cgroup_path, &fds) < 0)
@@ -479,27 +647,28 @@ int main(int argc, char** argv)
     goto cleanup;
   }
 
-  printf("Starting asynchronous state migration...\n");
-  if (trigger_cgroup_iterator(args.cgroup_path, old_policy.progs.trigger_push) < 0)
+  if (run_state_migration_round(args.cgroup_path,
+                                old_policy.progs.trigger_push,
+                                new_policy.progs.trigger_pull,
+                                "Initial") < 0)
+    goto cleanup;
+
+  notify_dispatcher_command(target_cgroup_id, "MIGRATION_BEGIN");
+
+  if (wait_dispatcher(&loader_server) < 0)
   {
-    fprintf(stderr, "Failed to execute migration pipeline.\n");
+    fprintf(stderr, "Failed to wait for dispatcher begin notification.\n");
     goto cleanup;
   }
-  int total_pulled = 0;
-  while (1)
-  {
-    int count = trigger_syscall_prog(new_policy.progs.trigger_pull);
 
-    if (count < 0)
-    {
-      fprintf(stderr, "Error occurred during data pull.\n");
-      break;
-    }
-    if (count == 0)
-      break;
-    total_pulled += count;
-    printf("Pulled %d folios (Total: %d)...\n", count, total_pulled);
-  }
+  if (run_state_migration_round(args.cgroup_path,
+                                old_policy.progs.trigger_push,
+                                new_policy.progs.trigger_pull,
+                                "Catch-up") < 0)
+    goto cleanup;
+
+  if (notify_dispatcher_command(target_cgroup_id, "MIGRATION_COMPLETE") == 0)
+    printf("Sent migration-complete command to Dispatcher.\n");
   // *******************************************************
 
   printf("Both policies are now attached to Dispatcher. Press [ENTER] to exit...\n");
@@ -520,6 +689,7 @@ cleanup:
     close(shared_qstate_fd);
   if (shared_queue_fd >= 0)
     close(shared_queue_fd);
+  destroy_server(&loader_server);
   if (fds.fd_added >= 0)
     close(fds.fd_added);
   if (fds.fd_accessed >= 0)

@@ -1,18 +1,38 @@
+#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
+
 #include <argp.h>
 #include <bpf/bpf.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
+
+#include "a_uapi.h"
 
 #include "a_dispatcher.skel.h"
 #include "dir_watcher.h"
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 #define REGISTRY_MAP_PATH "/sys/fs/bpf/dispatcher_registry"
+#define DISPATCHER_CONTROL_SOCKET_PATH "/tmp/cache_ext_dispatcher_%llu.sock"
+#define LOADER_CONTROL_SOCKET_PATH "/tmp/cache_ext_loader_%llu.sock"
+
+#define MAX_EVENTS 10
 
 char* USAGE = "Usage: ./a_dispatcher --watch_dir <dir> --cgroup_path <path>\n";
 struct cmdline_args
@@ -103,6 +123,15 @@ static int validate_watch_dir(const char* watch_dir, char* watch_dir_full_path)
   return 0;
 }
 
+static u64 get_cgroup_id(int cgroup_fd)
+{
+  struct stat st;
+  if (fstat(cgroup_fd, &st) < 0)
+    return 0;
+
+  return (u64)st.st_ino;
+}
+
 struct dispatcher_prog_ids
 {
   __u32 folio_added_id;
@@ -111,6 +140,15 @@ struct dispatcher_prog_ids
   __u32 folio_evicted_id;
 };
 
+struct dispatcher_ring_ctx
+{
+  __u64 cgroup_id;
+  bool notified;
+};
+
+/**
+ * ******************************************registry*******************************************
+ */
 int get_or_create_registry_map()
 {
   // 1. 尝试直接打开
@@ -147,13 +185,12 @@ int get_or_create_registry_map()
 void register_dispatcher(int cgroup_fd, struct a_dispatcher_bpf* skel)
 {
   // 1. 获取 Cgroup ID (Inode)
-  struct stat st;
-  if (fstat(cgroup_fd, &st) < 0)
+  __u64 cgroup_id = get_cgroup_id(cgroup_fd);
+  if (cgroup_id == 0)
   {
     perror("Failed to stat cgroup fd");
     return;
   }
-  __u64 cgroup_id = st.st_ino;
 
   // 2. 获取 Program ID
 
@@ -202,10 +239,9 @@ void register_dispatcher(int cgroup_fd, struct a_dispatcher_bpf* skel)
 
 void unregister_dispatcher(int cgroup_fd)
 {
-  struct stat st;
-  if (fstat(cgroup_fd, &st) < 0)
+  __u64 cgroup_id = get_cgroup_id(cgroup_fd);
+  if (cgroup_id == 0)
     return;
-  __u64 cgroup_id = st.st_ino;
 
   int map_fd = bpf_obj_get(REGISTRY_MAP_PATH);
   if (map_fd >= 0)
@@ -216,6 +252,287 @@ void unregister_dispatcher(int cgroup_fd)
     }
     close(map_fd);
   }
+}
+
+/**
+ * ******************************************recieve / send command*******************************************
+ */
+
+struct dispatcher_server
+{
+  int listen_fd;
+  int epoll_fd;
+  int ring_epoll_fd;
+  char socket_path[PATH_MAX];
+  struct dispatcher_ring_ctx ring_ctx;
+  struct ring_buffer* complete_rb;
+};
+
+void handle_loader_command(struct a_dispatcher_bpf* skel, char* cmd)
+{
+  if (strcmp(cmd, "MIGRATION_BEGIN") == 0)
+  {
+    skel->bss->global_ts.high_ghr_streak = 0;
+    skel->bss->global_ts.low_ghr_streak = 0;
+    uint64_t routing_core = ((uint64_t)100 << 32) | PHASE_SLOW_START;
+    __atomic_store_n(&skel->bss->global_ts.routing_core, routing_core, __ATOMIC_RELEASE);
+    __atomic_store_n(&skel->bss->enable_secondary_slot, 1, __ATOMIC_RELEASE);
+    printf("[Dispatcher] Received MIGRATION_BEGIN. phase=%u p=%u\n",
+           skel->bss->global_ts.phase, skel->bss->global_ts.p);
+  }
+  else if (strcmp(cmd, "MIGRATION_COMPLETE") == 0)
+  {
+    printf("[Dispatcher] Received MIGRATION_COMPLETE. Migration finished.\n");
+  }
+}
+
+static int handle_loader(int listen_fd, struct a_dispatcher_bpf* skel)
+{
+  while (1)
+  {
+    int conn_fd;
+    char buf[128];
+
+    conn_fd = accept(listen_fd, NULL, NULL);
+    if (conn_fd < 0)
+    {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+        return 0;
+
+      perror("accept");
+      return -1;
+    }
+
+    ssize_t n = read(conn_fd, buf, sizeof(buf) - 1);
+    if (n > 0)
+    {
+      buf[n] = '\0';
+      handle_loader_command(skel, buf);
+    }
+
+    close(conn_fd);
+  }
+}
+
+static int notify_loader_command(__u64 cgroup_id, const char* msg)
+{
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0)
+    return -1;
+
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+
+  char cmd_socket_path[PATH_MAX];
+
+  snprintf(cmd_socket_path, sizeof(cmd_socket_path), LOADER_CONTROL_SOCKET_PATH, cgroup_id);
+  strncpy(addr.sun_path, cmd_socket_path, sizeof(addr.sun_path) - 1);
+
+  int ret = -1;
+  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+  {
+    if (write(fd, msg, strlen(msg)) >= 0)
+      ret = 0;
+  }
+  else
+  {
+    perror("Failed to connect to loader control socket");
+  }
+
+  close(fd);
+  return ret;
+}
+
+static int handle_bpf_dispatcher_command(void* ctx, void* data, size_t data_sz)
+{
+  struct dispatcher_ring_ctx* ring_ctx = ctx;
+  if (!ring_ctx || data_sz < sizeof(u32))
+    return 0;
+
+  u32 phase = *(u32*)data;
+  if (phase == PHASE_COMPLETE && !ring_ctx->notified)
+  {
+    ring_ctx->notified = true;
+    if (notify_loader_command(ring_ctx->cgroup_id, "MIGRATION_COMPLETE") == 0)
+      printf("[Dispatcher] Forwarded COMPLETE event to loader.\n");
+  }
+  return 0;
+}
+
+static int handle_bpf_dispatcher(struct ring_buffer* complete_rb)
+{
+  int ret = ring_buffer__consume(complete_rb);
+  if (ret < 0 && ret != -EINTR)
+  {
+    fprintf(stderr, "ring_buffer__poll failed: %d\n", ret);
+    return -1;
+  }
+  return 0;
+}
+
+static int add_epoll_fd(int epoll_fd, int fd)
+{
+  struct epoll_event ev;
+  memset(&ev, 0, sizeof(ev));
+
+  ev.events = EPOLLIN; // 监听事件类型：可读事件
+  ev.data.fd = fd;
+
+  // 将 fd 插入到 epoll_fd 内部的红黑树中，按照 ev 设定的规则开始监控
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0)
+  {
+    perror("epoll_ctl add failed");
+    return -1;
+  }
+
+  return 0;
+}
+
+static int build_server(int cgroup_fd, struct a_dispatcher_bpf* skel,
+                        struct dispatcher_server* server)
+{
+  memset(server, 0, sizeof(*server));
+  server->listen_fd = -1;
+  server->epoll_fd = -1;
+  server->ring_epoll_fd = -1;
+
+  struct bpf_map* complete_events_map =
+      bpf_object__find_map_by_name(skel->obj, "migration_complete_events");
+  if (!complete_events_map)
+  {
+    fprintf(stderr, "Failed to find migration_complete_events map\n");
+    return -1;
+  }
+
+  __u64 cgroup_id = get_cgroup_id(cgroup_fd);
+  server->ring_ctx.cgroup_id = cgroup_id;
+  server->ring_ctx.notified = false;
+
+  // ring buffer
+  server->complete_rb = ring_buffer__new(bpf_map__fd(complete_events_map),
+                                         handle_bpf_dispatcher_command, &server->ring_ctx, NULL);
+  if (!server->complete_rb)
+  {
+    fprintf(stderr, "Failed to create ring buffer for COMPLETE events\n");
+    return -1;
+  }
+  server->ring_epoll_fd = ring_buffer__epoll_fd(server->complete_rb);
+  if (server->ring_epoll_fd < 0)
+  {
+    fprintf(stderr, "Failed to get ring buffer epoll fd\n");
+    return -1;
+  }
+  // socket
+  server->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (server->listen_fd < 0)
+  {
+    perror("Failed to create command socket");
+    return -1;
+  }
+
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+
+  snprintf(server->socket_path, sizeof(server->socket_path),
+           DISPATCHER_CONTROL_SOCKET_PATH, cgroup_id);
+  unlink(server->socket_path);
+  strncpy(addr.sun_path, server->socket_path, sizeof(addr.sun_path) - 1);
+
+  int flags = fcntl(server->listen_fd, F_GETFL, 0);
+  if (flags >= 0)
+    fcntl(server->listen_fd, F_SETFL, flags | O_NONBLOCK);
+
+  if (bind(server->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+  {
+    perror("Failed to bind command socket");
+    return -1;
+  }
+
+  if (listen(server->listen_fd, 5) < 0)
+  {
+    perror("Failed to listen on command socket");
+    return -1;
+  }
+
+  server->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+  if (server->epoll_fd < 0)
+  {
+    perror("Failed to create epoll instance");
+    return -1;
+  }
+
+  if (add_epoll_fd(server->epoll_fd, server->listen_fd) < 0)
+    return -1;
+  if (add_epoll_fd(server->epoll_fd, server->ring_epoll_fd) < 0)
+    return -1;
+
+  return 0;
+}
+
+static void destroy_dispatcher_command_server(struct dispatcher_server* server)
+{
+  if (server->epoll_fd >= 0)
+    close(server->epoll_fd);
+  if (server->complete_rb)
+    ring_buffer__free(server->complete_rb);
+  if (server->listen_fd >= 0)
+    close(server->listen_fd);
+  if (server->socket_path[0] != '\0')
+    unlink(server->socket_path);
+}
+
+static int dispatcher_command_server_step(struct dispatcher_server* server,
+                                          struct a_dispatcher_bpf* skel)
+{
+  struct epoll_event events[MAX_EVENTS];
+  int n = epoll_wait(server->epoll_fd, events, MAX_EVENTS, -1);
+  if (n < 0)
+  {
+    if (errno == EINTR)
+      return 0;
+
+    perror("epoll_wait failed");
+    return -1;
+  }
+
+  for (int i = 0; i < n; i++)
+  {
+    int ready_fd = events[i].data.fd;
+    // 有新连接到达时触发
+    if (ready_fd == server->listen_fd)
+    {
+      if (handle_loader(server->listen_fd, skel) < 0)
+        return -1;
+    }
+    else if (ready_fd == server->ring_epoll_fd)
+    {
+      if (handle_bpf_dispatcher(server->complete_rb) < 0)
+        return -1;
+    }
+  }
+
+  return 0;
+}
+
+int run_command_server(int cgroup_fd, struct a_dispatcher_bpf* skel)
+{
+  struct dispatcher_server server = {0};
+
+  if (build_server(cgroup_fd, skel, &server) < 0)
+    return -1;
+
+  printf("Dispatcher is running and listening for commands...\n");
+
+  while (!exiting)
+  {
+    if (dispatcher_command_server_step(&server, skel) < 0)
+      continue;
+  }
+
+  destroy_dispatcher_command_server(&server);
+  return 0;
 }
 
 int main(int argc, char** argv)
@@ -293,8 +610,7 @@ int main(int argc, char** argv)
 
   register_dispatcher(cgroup_fd, skel);
   // Wait for keyboard input
-  printf("Press any key to exit...\n");
-  getchar();
+  run_command_server(cgroup_fd, skel);
   ret = 0;
 
 cleanup:
