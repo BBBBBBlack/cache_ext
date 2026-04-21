@@ -1,0 +1,173 @@
+root@bbbbbblack-virtual-machine:~/data_block/cache_ext/policies# ./a_user_loader.out -c /sys/fs/cgroup/cache_ext_test -o fifo -n s3fifo
+Service Discovery: folio_added (FD:4), evict_folios (FD:6)
+Old Policy running. Inject traffic now, then press [ENTER] to migrate...
+
+[Initial] Starting asynchronous state migration...
+Iterator pipeline execution finished.
+已杀死
+root@bbbbbblack-virtual-machine:~/data_block/cache_ext/policies# clear
+root@bbbbbblack-virtual-machine:~/data_block/cache_ext/policies# dmesg -T | tail -n 100
+[二 4月 21 19:43:25 2026] RDX: 0000000000000050 RSI: 00007ffea2d9d9f0 RDI: 000000000000000a
+[二 4月 21 19:43:25 2026] RBP: 00007ffea2d9db50 R08: 00000f55bfcd8085 R09: 0000000000000021
+[二 4月 21 19:43:25 2026] R10: 00000f55bfcd8088 R11: 0000000000000246 R12: 0000000000000021
+[二 4月 21 19:43:25 2026] R13: 0000000000000000 R14: 00007aa9fe700420 R15: 00000f553fce008b
+[二 4月 21 19:43:25 2026]  </TASK>
+[二 4月 21 19:43:25 2026] Modules linked in: xt_CHECKSUM xt_MASQUERADE xt_conntrack ipt_REJECT nf_reject_ipv4 xt_tcpudp nft_compat x_tables nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 nf_tables libcrc32c nfnetlink bridge stp llc binfmt_misc nls_iso8859_1 e1000 ahci libahci hid_generic usbhid hid psmouse mptspi mptscsih mptbase i2c_piix4 pata_acpi scsi_transport_spi
+[二 4月 21 19:43:26 2026] CR2: 0000000000000898
+[二 4月 21 19:43:26 2026] ---[ end trace 0000000000000000 ]---
+[二 4月 21 19:43:26 2026] RIP: 0010:bpf_cache_ext_list_add_tail+0x40/0xd0
+[二 4月 21 19:43:26 2026] Code: 48 8b 4e 38 48 89 c8 48 83 e0 fc f6 c1 02 74 04 48 8b 40 10 48 8b 0b 48 c1 e9 36 48 8b 0c cd 10 c1 57 83 48 63 89 40 9e 02 00 <4c> 8b a4 c8 98 08 00 00 4d 8d bc 24 30 07 00 00 4c 89 ff e8 88 b2
+[二 4月 21 19:43:26 2026] RSP: 0018:ffffc90000bffc30 EFLAGS: 00010246
+[二 4月 21 19:43:26 2026] RAX: 0000000000000000 RBX: ffffea000547fe40 RCX: 0000000000000000
+[二 4月 21 19:43:26 2026] RDX: 0000000000000000 RSI: ffffea000547fe40 RDI: ffff888100fd3a00
+[二 4月 21 19:43:26 2026] RBP: ffffc90000bffc50 R08: 0000000000000000 R09: 0000000000000000
+[二 4月 21 19:43:26 2026] R10: 0000000000000000 R11: 0000000000000000 R12: 0000000000000000
+[二 4月 21 19:43:26 2026] R13: ffff88811e26ff10 R14: ffff888100fd3a00 R15: 00000000000003f8
+[二 4月 21 19:43:26 2026] FS:  00007aaa005dbbc0(0000) GS:ffff888233e00000(0000) knlGS:0000000000000000
+[二 4月 21 19:43:26 2026] CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+[二 4月 21 19:43:26 2026] CR2: 0000000000000898 CR3: 000000013c8a8003 CR4: 0000000000370ef0
+[二 4月 21 19:43:26 2026] note: a_user_loader.o[7423] exited with irqs disabled
+[二 4月 21 19:43:26 2026] ------------[ cut here ]------------
+[二 4月 21 19:43:26 2026] WARNING: CPU: 0 PID: 7423 at kernel/rcu/tasks.h:1820 exit_tasks_rcu_finish+0xec/0x110
+[二 4月 21 19:43:26 2026] Modules linked in: xt_CHECKSUM xt_MASQUERADE xt_conntrack ipt_REJECT nf_reject_ipv4 xt_tcpudp nft_compat x_tables nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 nf_tables libcrc32c nfnetlink bridge stp llc binfmt_misc nls_iso8859_1 e1000 ahci libahci hid_generic usbhid hid psmouse mptspi mptscsih mptbase i2c_piix4 pata_acpi scsi_transport_spi
+[二 4月 21 19:43:26 2026] CPU: 0 PID: 7423 Comm: a_user_loader.o Tainted: G      D            6.6.8-cache-ext+ #23
+[二 4月 21 19:43:26 2026] Hardware name: VMware, Inc. VMware Virtual Platform/440BX Desktop Reference Platform, BIOS 6.00 11/12/2020
+[二 4月 21 19:43:26 2026] RIP: 0010:exit_tasks_rcu_finish+0xec/0x110
+[二 4月 21 19:43:26 2026] Code: 00 00 00 65 48 8b 04 25 28 00 00 00 48 3b 45 e8 75 28 48 83 c4 18 5b 41 5e 5d 31 c0 31 c9 31 ff 31 d2 31 f6 c3 cc cc cc cc cc <0f> 0b eb ba 0f 0b 48 89 df e8 86 02 00 00 eb c9 e8 af 6d f3 00 66
+[二 4月 21 19:43:26 2026] RSP: 0018:ffffc90000bffeb0 EFLAGS: 00010202
+[二 4月 21 19:43:26 2026] RAX: 0000000000000002 RBX: ffff888103170000 RCX: 0000000000000001
+[二 4月 21 19:43:26 2026] RDX: 0000000000000000 RSI: 0000000000000000 RDI: 0000000000000000
+[二 4月 21 19:43:26 2026] RBP: ffffc90000bffed8 R08: 0000000000000000 R09: 0000000000000000
+[二 4月 21 19:43:26 2026] R10: 0000000000000000 R11: 0000000000000000 R12: ffffc90000bffef0
+[二 4月 21 19:43:26 2026] R13: ffff8881031709b0 R14: ffff888103170879 R15: ffffc90000bffef0
+[二 4月 21 19:43:26 2026] FS:  0000000000000000(0000) GS:ffff888233e00000(0000) knlGS:0000000000000000
+[二 4月 21 19:43:26 2026] CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+[二 4月 21 19:43:26 2026] CR2: 0000000000000898 CR3: 0000000003234005 CR4: 0000000000370ef0
+[二 4月 21 19:43:26 2026] Call Trace:
+[二 4月 21 19:43:26 2026]  <TASK>
+[二 4月 21 19:43:26 2026]  ? show_regs+0x5d/0x70
+[二 4月 21 19:43:26 2026]  ? __warn+0xca/0x1d0
+[二 4月 21 19:43:26 2026]  ? exit_tasks_rcu_finish+0xec/0x110
+[二 4月 21 19:43:26 2026]  ? report_bug+0x150/0x200
+[二 4月 21 19:43:26 2026]  ? handle_bug+0x46/0x80
+[二 4月 21 19:43:26 2026]  ? exc_invalid_op+0x1b/0x50
+[二 4月 21 19:43:26 2026]  ? asm_exc_invalid_op+0x1b/0x20
+[二 4月 21 19:43:26 2026]  ? exit_tasks_rcu_finish+0xec/0x110
+[二 4月 21 19:43:26 2026]  do_exit+0x6f2/0x960
+[二 4月 21 19:43:26 2026]  make_task_dead+0x80/0x130
+[二 4月 21 19:43:26 2026]  rewind_stack_and_make_dead+0x17/0x20
+[二 4月 21 19:43:26 2026] RIP: 0033:0x7aaa0031e8fd
+[二 4月 21 19:43:26 2026] Code: Unable to access opcode bytes at 0x7aaa0031e8d3.
+[二 4月 21 19:43:26 2026] RSP: 002b:00007ffea2d9d9e8 EFLAGS: 00000246 ORIG_RAX: 0000000000000141
+[二 4月 21 19:43:26 2026] RAX: ffffffffffffffda RBX: 00007aa9fe700420 RCX: 00007aaa0031e8fd
+[二 4月 21 19:43:26 2026] RDX: 0000000000000050 RSI: 00007ffea2d9d9f0 RDI: 000000000000000a
+[二 4月 21 19:43:26 2026] RBP: 00007ffea2d9db50 R08: 00000f55bfcd8085 R09: 0000000000000021
+[二 4月 21 19:43:26 2026] R10: 00000f55bfcd8088 R11: 0000000000000246 R12: 0000000000000021
+[二 4月 21 19:43:26 2026] R13: 0000000000000000 R14: 00007aa9fe700420 R15: 00000f553fce008b
+[二 4月 21 19:43:26 2026]  </TASK>
+[二 4月 21 19:43:26 2026] ---[ end trace 0000000000000000 ]---
+[二 4月 21 19:43:26 2026] ------------[ cut here ]------------
+[二 4月 21 19:43:26 2026] WARNING: CPU: 0 PID: 7423 at kernel/rcu/tasks.h:1821 exit_tasks_rcu_finish+0xf0/0x110
+[二 4月 21 19:43:26 2026] Modules linked in: xt_CHECKSUM xt_MASQUERADE xt_conntrack ipt_REJECT nf_reject_ipv4 xt_tcpudp nft_compat x_tables nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 nf_tables libcrc32c nfnetlink bridge stp llc binfmt_misc nls_iso8859_1 e1000 ahci libahci hid_generic usbhid hid psmouse mptspi mptscsih mptbase i2c_piix4 pata_acpi scsi_transport_spi
+[二 4月 21 19:43:26 2026] CPU: 0 PID: 7423 Comm: a_user_loader.o Tainted: G      D W          6.6.8-cache-ext+ #23
+[二 4月 21 19:43:26 2026] Hardware name: VMware, Inc. VMware Virtual Platform/440BX Desktop Reference Platform, BIOS 6.00 11/12/2020
+[二 4月 21 19:43:26 2026] RIP: 0010:exit_tasks_rcu_finish+0xf0/0x110
+[二 4月 21 19:43:26 2026] Code: 48 8b 04 25 28 00 00 00 48 3b 45 e8 75 28 48 83 c4 18 5b 41 5e 5d 31 c0 31 c9 31 ff 31 d2 31 f6 c3 cc cc cc cc cc 0f 0b eb ba <0f> 0b 48 89 df e8 86 02 00 00 eb c9 e8 af 6d f3 00 66 66 66 66 66
+[二 4月 21 19:43:26 2026] RSP: 0018:ffffc90000bffeb0 EFLAGS: 00010202
+[二 4月 21 19:43:26 2026] RAX: 0000000000000001 RBX: ffff888103170000 RCX: 0000000000000001
+[二 4月 21 19:43:26 2026] RDX: 0000000000000000 RSI: 0000000000000000 RDI: 0000000000000000
+[二 4月 21 19:43:26 2026] RBP: ffffc90000bffed8 R08: 0000000000000000 R09: 0000000000000000
+[二 4月 21 19:43:26 2026] R10: 0000000000000000 R11: 0000000000000000 R12: ffffc90000bffef0
+[二 4月 21 19:43:26 2026] R13: ffff8881031709b0 R14: ffff888103170879 R15: ffffc90000bffef0
+[二 4月 21 19:43:26 2026] FS:  0000000000000000(0000) GS:ffff888233e00000(0000) knlGS:0000000000000000
+[二 4月 21 19:43:26 2026] CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+[二 4月 21 19:43:26 2026] CR2: 0000000000000898 CR3: 0000000003234005 CR4: 0000000000370ef0
+[二 4月 21 19:43:26 2026] Call Trace:
+[二 4月 21 19:43:26 2026]  <TASK>
+[二 4月 21 19:43:26 2026]  ? show_regs+0x5d/0x70
+[二 4月 21 19:43:26 2026]  ? __warn+0xca/0x1d0
+[二 4月 21 19:43:26 2026]  ? exit_tasks_rcu_finish+0xf0/0x110
+[二 4月 21 19:43:26 2026]  ? report_bug+0x150/0x200
+[二 4月 21 19:43:26 2026]  ? handle_bug+0x46/0x80
+[二 4月 21 19:43:26 2026]  ? exc_invalid_op+0x1b/0x50
+[二 4月 21 19:43:26 2026]  ? asm_exc_invalid_op+0x1b/0x20
+[二 4月 21 19:43:26 2026]  ? exit_tasks_rcu_finish+0xf0/0x110
+[二 4月 21 19:43:26 2026]  do_exit+0x6f2/0x960
+[二 4月 21 19:43:26 2026]  make_task_dead+0x80/0x130
+[二 4月 21 19:43:26 2026]  rewind_stack_and_make_dead+0x17/0x20
+[二 4月 21 19:43:26 2026] RIP: 0033:0x7aaa0031e8fd
+[二 4月 21 19:43:26 2026] Code: Unable to access opcode bytes at 0x7aaa0031e8d3.
+[二 4月 21 19:43:26 2026] RSP: 002b:00007ffea2d9d9e8 EFLAGS: 00000246 ORIG_RAX: 0000000000000141
+[二 4月 21 19:43:26 2026] RAX: ffffffffffffffda RBX: 00007aa9fe700420 RCX: 00007aaa0031e8fd
+[二 4月 21 19:43:26 2026] RDX: 0000000000000050 RSI: 00007ffea2d9d9f0 RDI: 000000000000000a
+[二 4月 21 19:43:26 2026] RBP: 00007ffea2d9db50 R08: 00000f55bfcd8085 R09: 0000000000000021
+[二 4月 21 19:43:26 2026] R10: 00000f55bfcd8088 R11: 0000000000000246 R12: 0000000000000021
+[二 4月 21 19:43:26 2026] R13: 0000000000000000 R14: 00007aa9fe700420 R15: 00000f553fce008b
+[二 4月 21 19:43:26 2026]  </TASK>
+[二 4月 21 19:43:26 2026] ---[ end trace 0000000000000000 ]---
+[二 4月 21 19:43:30 2026] cache_ext: Unregistering struct ops
+[二 4月 21 19:43:30 2026] cache_ext: unreg: Memcg pointer: 00000000a86220eb
+root@bbbbbblack-virtual-machine:~/data_block/cache_ext/policies# dmesg -T | grep -B 30 "RIP: 0010:bpf_cache_ext_list_add_tail"
+[二 4月 21 19:41:40 2026] cache_ext: Cgroup sees available memory: 8280887296 B (7897 MB)
+[二 4月 21 19:41:41 2026] cache_ext: Calling init
+[二 4月 21 19:41:41 2026] cache_ext: Registering struct ops
+[二 4月 21 19:42:09 2026] tee (7252): drop_caches: 3
+[二 4月 21 19:42:26 2026] cache_ext: Unregistering struct ops
+[二 4月 21 19:42:26 2026] cache_ext: unreg: Memcg pointer: 00000000dd61d03e
+[二 4月 21 19:42:42 2026] sh (7342): drop_caches: 1
+[二 4月 21 19:42:43 2026] cache_ext: Cgroup cache_ext_test is a cache_ext cgroup
+[二 4月 21 19:42:43 2026] cache_ext: Creating cache ext structures for node 0, num_buckets = 2097152
+[二 4月 21 19:42:43 2026] cache_ext: Cgroup sees available memory: 8280887296 B (7897 MB)
+[二 4月 21 19:42:43 2026] Freeing valid folios set
+[二 4月 21 19:42:43 2026] cache_ext: Calling init
+[二 4月 21 19:42:43 2026] cache_ext: Registering struct ops
+[二 4月 21 19:42:55 2026] tee (7378): drop_caches: 3
+[二 4月 21 19:43:07 2026] cache_ext: Unregistering struct ops
+[二 4月 21 19:43:07 2026] cache_ext: unreg: Memcg pointer: 000000008eaf3637
+[二 4月 21 19:43:13 2026] sh (7403): drop_caches: 1
+[二 4月 21 19:43:13 2026] cache_ext: Cgroup cache_ext_test is a cache_ext cgroup
+[二 4月 21 19:43:13 2026] cache_ext: Creating cache ext structures for node 0, num_buckets = 2097152
+[二 4月 21 19:43:13 2026] cache_ext: Cgroup sees available memory: 8280887296 B (7897 MB)
+[二 4月 21 19:43:13 2026] cache_ext: Calling init
+[二 4月 21 19:43:13 2026] cache_ext: Registering struct ops
+[二 4月 21 19:43:25 2026] tee (7438): drop_caches: 3
+[二 4月 21 19:43:25 2026] BUG: kernel NULL pointer dereference, address: 0000000000000898
+[二 4月 21 19:43:25 2026] #PF: supervisor read access in kernel mode
+[二 4月 21 19:43:25 2026] #PF: error_code(0x0000) - not-present page
+[二 4月 21 19:43:25 2026] PGD 0 P4D 0 
+[二 4月 21 19:43:25 2026] Oops: 0000 [#1] PREEMPT SMP PTI
+[二 4月 21 19:43:25 2026] CPU: 0 PID: 7423 Comm: a_user_loader.o Not tainted 6.6.8-cache-ext+ #23
+[二 4月 21 19:43:25 2026] Hardware name: VMware, Inc. VMware Virtual Platform/440BX Desktop Reference Platform, BIOS 6.00 11/12/2020
+[二 4月 21 19:43:25 2026] RIP: 0010:bpf_cache_ext_list_add_tail+0x40/0xd0
+--
+[二 4月 21 19:43:25 2026]  ? asm_exc_page_fault+0x27/0x30
+[二 4月 21 19:43:25 2026]  ? bpf_cache_ext_list_add_tail+0x40/0xd0
+[二 4月 21 19:43:25 2026]  bpf_prog_be872c55a66fe18a_trigger_pull+0x367/0x3ad
+[二 4月 21 19:43:25 2026]  bpf_prog_run_pin_on_cpu+0x27/0x90
+[二 4月 21 19:43:25 2026]  bpf_prog_test_run_syscall+0xe6/0x160
+[二 4月 21 19:43:25 2026]  bpf_prog_test_run+0xff/0x1a0
+[二 4月 21 19:43:25 2026]  __sys_bpf+0x313/0x650
+[二 4月 21 19:43:25 2026]  __x64_sys_bpf+0x1c/0x30
+[二 4月 21 19:43:25 2026]  do_syscall_64+0x60/0xa0
+[二 4月 21 19:43:25 2026]  ? __fput+0x1ff/0x2a0
+[二 4月 21 19:43:25 2026]  ? exit_to_user_mode_prepare+0x38/0xd0
+[二 4月 21 19:43:25 2026]  ? syscall_exit_to_user_mode+0x44/0x1b0
+[二 4月 21 19:43:25 2026]  ? do_syscall_64+0x6f/0xa0
+[二 4月 21 19:43:25 2026]  ? exit_to_user_mode_prepare+0x38/0xd0
+[二 4月 21 19:43:25 2026]  ? irqentry_exit_to_user_mode+0x19/0x30
+[二 4月 21 19:43:25 2026]  ? irqentry_exit+0x12/0x50
+[二 4月 21 19:43:25 2026]  ? exc_page_fault+0x8e/0x1a0
+[二 4月 21 19:43:25 2026]  entry_SYSCALL_64_after_hwframe+0x6e/0xd8
+[二 4月 21 19:43:25 2026] RIP: 0033:0x7aaa0031e8fd
+[二 4月 21 19:43:25 2026] Code: 5b 41 5c c3 66 0f 1f 84 00 00 00 00 00 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 8b 0d 03 b5 0f 00 f7 d8 64 89 01 48
+[二 4月 21 19:43:25 2026] RSP: 002b:00007ffea2d9d9e8 EFLAGS: 00000246 ORIG_RAX: 0000000000000141
+[二 4月 21 19:43:25 2026] RAX: ffffffffffffffda RBX: 00007aa9fe700420 RCX: 00007aaa0031e8fd
+[二 4月 21 19:43:25 2026] RDX: 0000000000000050 RSI: 00007ffea2d9d9f0 RDI: 000000000000000a
+[二 4月 21 19:43:25 2026] RBP: 00007ffea2d9db50 R08: 00000f55bfcd8085 R09: 0000000000000021
+[二 4月 21 19:43:25 2026] R10: 00000f55bfcd8088 R11: 0000000000000246 R12: 0000000000000021
+[二 4月 21 19:43:25 2026] R13: 0000000000000000 R14: 00007aa9fe700420 R15: 00000f553fce008b
+[二 4月 21 19:43:25 2026]  </TASK>
+[二 4月 21 19:43:25 2026] Modules linked in: xt_CHECKSUM xt_MASQUERADE xt_conntrack ipt_REJECT nf_reject_ipv4 xt_tcpudp nft_compat x_tables nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 nf_tables libcrc32c nfnetlink bridge stp llc binfmt_misc nls_iso8859_1 e1000 ahci libahci hid_generic usbhid hid psmouse mptspi mptscsih mptbase i2c_piix4 pata_acpi scsi_transport_spi
+[二 4月 21 19:43:26 2026] CR2: 0000000000000898
+[二 4月 21 19:43:26 2026] ---[ end trace 0000000000000000 ]---
+[二 4月 21 19:43:26 2026] RIP: 0010:bpf_cache_ext_list_add_tail+0x40/0xd0

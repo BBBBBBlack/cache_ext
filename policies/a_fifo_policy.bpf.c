@@ -123,7 +123,7 @@ __fifo_add_folio(struct folio* folio,
 {
   if (!migrated_metrics || ensure_initialized_by_folio(folio) < 0)
     return -1;
-  if (!folio->mapping)
+  if (!folio_test_lru(folio) || !folio->mapping)
     return 0;
   if (bpf_cache_ext_list_add_tail(main_list, folio))
     return -1;

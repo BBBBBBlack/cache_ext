@@ -205,12 +205,14 @@ __s3fifo_add_folio(struct folio* folio,
   if (!migrated_metrics || ensure_initialized_by_folio(folio) < 0)
     return -1;
 
-  if (!folio->mapping || folio_in_ghost(folio))
+  if (!folio_test_lru(folio) || !folio->mapping)
     return 0;
 
   u64 key = (u64)folio;
   struct folio_metadata new_meta = {0};
   u64 list_to_add;
+
+  folio_in_ghost(folio);
 
   new_meta.freq = (migrated_metrics->freq >= 3) ? 3 : migrated_metrics->freq;
   new_meta.in_main = true;

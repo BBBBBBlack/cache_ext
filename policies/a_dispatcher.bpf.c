@@ -177,7 +177,7 @@ static __noinline void update_transition_state(struct transition_state* state, u
 
 // *********************** Ghost Map ***********************
 
-const volatile u64 ghost_window_ns = 1000000000ULL;
+const volatile u64 ghost_window_ns = 200000000ULL;
 
 #define DISPATCHER_GHOST_MAP_MAX_ENTRIES (1U << 20)
 #define DISPATCHER_MIN_SAMPLES_FOR_EWMA 100
