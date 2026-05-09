@@ -1,32 +1,21 @@
 #include <argp.h>
 #include <bpf/bpf.h>
-// #include "vmlinux.h"
 #include <bpf/libbpf.h>
 #include <fcntl.h>
-#include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+#include <sys/epoll.h>
+
 #include <sys/stat.h>
-#include <sys/un.h>
-#include <unistd.h>
 
+#include "a_communication.h"
+#include "a_uapi.h"
 #include "logger.h"
-
-typedef unsigned long long u64;
-typedef unsigned int u32;
 
 #include "a_fifo_policy.skel.h"
 #include "a_s3fifo_policy.skel.h"
 
 #define REGISTRY_MAP_PATH "/sys/fs/bpf/dispatcher_registry"
-#define DISPATCHER_CONTROL_SOCKET_PATH "/tmp/cache_ext_dispatcher_%llu.sock"
-#define LOADER_CONTROL_SOCKET_PATH "/tmp/cache_ext_loader_%llu.sock"
-
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
 
 #ifndef BPF_CGROUP_ITER_SELF_ONLY
 enum bpf_cgroup_iter_order
@@ -117,25 +106,23 @@ static error_t parse_opt(int key, char* arg, struct argp_state* state)
 static struct argp argp = {options, parse_opt, 0, "Load FIFO policy and attach to a specific Cgroup Dispatcher."};
 
 /********策略选择*********/
-#define INIT_POLICY_CASE(UPPER, lower)                                                 \
-  case POLICY_##UPPER:                                                                 \
-    driver->type = POLICY_##UPPER;                                                     \
-    driver->skel.lower = a_##lower##_policy_bpf__open();                               \
-    if (!driver->skel.lower)                                                           \
-      return -1;                                                                       \
-    driver->load = wrap_##lower##_load;                                                \
-    driver->attach = wrap_##lower##_attach;                                            \
-    driver->destroy = wrap_##lower##_destroy;                                          \
-    driver->get_call_count = wrap_##lower##_get_call_count;                            \
-    driver->progs.do_targeted_init = driver->skel.lower->progs.do_targeted_init;       \
-    driver->progs.trigger_push = driver->skel.lower->progs.trigger_push;               \
-    driver->progs.trigger_pull = driver->skel.lower->progs.trigger_pull;               \
-    driver->progs.folio_added = driver->skel.lower->progs.lower##_folio_added;         \
-    driver->progs.folio_accessed = driver->skel.lower->progs.lower##_folio_accessed;   \
-    driver->progs.evict_folios = driver->skel.lower->progs.lower##_evict_folios;       \
-    driver->progs.folio_evicted = driver->skel.lower->progs.lower##_folio_evicted;     \
-    driver->maps.migration_qstate_map = driver->skel.lower->maps.migration_qstate_map; \
-    driver->maps.migration_queue = driver->skel.lower->maps.migration_queue;           \
+#define INIT_POLICY_CASE(UPPER, lower)                                               \
+  case POLICY_##UPPER:                                                               \
+    driver->type = POLICY_##UPPER;                                                   \
+    driver->skel.lower = a_##lower##_policy_bpf__open();                             \
+    if (!driver->skel.lower)                                                         \
+      return -1;                                                                     \
+    driver->load = wrap_##lower##_load;                                              \
+    driver->attach = wrap_##lower##_attach;                                          \
+    driver->destroy = wrap_##lower##_destroy;                                        \
+    driver->get_call_count = wrap_##lower##_get_call_count;                          \
+    driver->progs.do_targeted_init = driver->skel.lower->progs.do_targeted_init;     \
+    driver->progs.folio_added = driver->skel.lower->progs.lower##_folio_added;       \
+    driver->progs.folio_accessed = driver->skel.lower->progs.lower##_folio_accessed; \
+    driver->progs.evict_folios = driver->skel.lower->progs.lower##_evict_folios;     \
+    driver->progs.folio_evicted = driver->skel.lower->progs.lower##_folio_evicted;   \
+    driver->progs.slot_pop = driver->skel.lower->progs.lower##_pop;                  \
+    driver->progs.slot_push = driver->skel.lower->progs.lower##_push;                \
     break;
 
 struct policy_driver
@@ -165,13 +152,9 @@ struct policy_driver
     struct bpf_program* evict_folios;
     struct bpf_program* folio_evicted;
     struct bpf_program* migrate_push_out;
+    struct bpf_program* slot_pop;
+    struct bpf_program* slot_push;
   } progs;
-
-  struct
-  {
-    struct bpf_map* migration_qstate_map;
-    struct bpf_map* migration_queue;
-  } maps;
 };
 
 static int wrap_fifo_load(struct policy_driver* driver)
@@ -245,116 +228,76 @@ int select_skel(struct policy_driver* driver, enum policy_type type)
 
 struct loader_server
 {
-  int listen_fd;
+  struct ipc_server_ctx ipc;
   __u64 cgroup_id;
   char socket_path[PATH_MAX];
 };
 
-static int notify_dispatcher_command(__u64 cgroup_id, const char* msg)
+static int run_state_migration_round(int dispatcher_pull_prog_fd, enum ipc_cmd phase);
+
+#define MAX_EPOLL_EVENTS 10
+
+static int wait_dispatcher(struct loader_server* server,
+                           int dispatcher_pull_prog_fd)
 {
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  struct sockaddr_un addr;
-  char cmd_socket_path[108];
+  struct epoll_event events[MAX_EPOLL_EVENTS];
+  int is_complete = 0;
+  int ret = 0;
+  printf("[Loader] Waiting for dispatcher events via epoll...\n");
 
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-
-  snprintf(cmd_socket_path, sizeof(cmd_socket_path),
-           DISPATCHER_CONTROL_SOCKET_PATH, cgroup_id);
-  strncpy(addr.sun_path, cmd_socket_path, sizeof(addr.sun_path) - 1);
-
-  int ret = -1;
-  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+  while (!is_complete)
   {
-    write(fd, msg, strlen(msg));
-    ret = 0;
-  }
-  else
-    perror("Failed to connect to Dispatcher socket");
+    int nfds = epoll_wait(server->ipc.epoll_fd, events, MAX_EPOLL_EVENTS, -1);
+    if (nfds < 0)
+    {
+      if (errno == EINTR)
+        continue;
+      perror("epoll_wait failed");
+      ret = -1;
+      break;
+    }
 
-  close(fd);
+    for (int i = 0; i < nfds; i++)
+    {
+      if (events[i].data.fd == server->ipc.listen_fd)
+      {
+        int conn_fd = accept(server->ipc.listen_fd, NULL, NULL);
+        if (conn_fd < 0)
+        {
+          if (errno == EAGAIN || errno == EWOULDBLOCK)
+            continue;
+          perror("Failed to accept dispatcher connection");
+          continue;
+        }
+
+        struct ipc_msg msg;
+        ssize_t n = recv(conn_fd, &msg, sizeof(msg), MSG_WAITALL);
+        close(conn_fd);
+
+        if (n != sizeof(msg))
+          continue;
+
+        if (msg.cmd == CMD_MIGRATION_PROGRESS)
+        {
+          if (run_state_migration_round(dispatcher_pull_prog_fd, CMD_MIGRATION_PROGRESS) < 0)
+          {
+            ret = -1;
+            is_complete = 1;
+          }
+        }
+        else if (msg.cmd == CMD_MIGRATION_COMPLETE)
+        {
+          if (run_state_migration_round(dispatcher_pull_prog_fd, CMD_MIGRATION_COMPLETE) < 0)
+            ret = -1;
+          printf("[Loader] Received MIGRATION_COMPLETE from dispatcher.\n");
+          is_complete = 1;
+        }
+        else
+          fprintf(stderr, "Unexpected dispatcher control message: %d\n", msg.cmd);
+      }
+    }
+  }
   return ret;
-}
-
-static int build_server(struct loader_server* server, __u64 cgroup_id)
-{
-  memset(server, 0, sizeof(*server));
-  server->listen_fd = -1;
-  server->cgroup_id = cgroup_id;
-
-  server->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (server->listen_fd < 0)
-  {
-    perror("Failed to create loader control socket");
-    return -1;
-  }
-
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-
-  snprintf(server->socket_path, sizeof(server->socket_path),
-           LOADER_CONTROL_SOCKET_PATH, cgroup_id);
-  unlink(server->socket_path);
-  strncpy(addr.sun_path, server->socket_path, sizeof(addr.sun_path) - 1);
-
-  if (bind(server->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
-  {
-    perror("Failed to bind loader control socket");
-    close(server->listen_fd);
-    server->listen_fd = -1;
-    return -1;
-  }
-
-  if (listen(server->listen_fd, 1) < 0)
-  {
-    perror("Failed to listen on loader control socket");
-    close(server->listen_fd);
-    server->listen_fd = -1;
-    return -1;
-  }
-
-  return 0;
-}
-
-static void destroy_server(struct loader_server* server)
-{
-  if (!server)
-    return;
-
-  if (server->listen_fd >= 0)
-    close(server->listen_fd);
-  if (server->socket_path[0] != '\0')
-    unlink(server->socket_path);
-}
-
-static int wait_dispatcher(const struct loader_server* server)
-{
-  int conn_fd = accept(server->listen_fd, NULL, NULL);
-  if (conn_fd < 0)
-  {
-    perror("Failed to accept dispatcher control connection");
-    return -1;
-  }
-
-  char buf[128];
-  ssize_t n = read(conn_fd, buf, sizeof(buf) - 1);
-  close(conn_fd);
-  if (n <= 0)
-  {
-    perror("Failed to read dispatcher control message");
-    return -1;
-  }
-
-  buf[n] = '\0';
-  if (strcmp(buf, "MIGRATION_COMPLETE") != 0)
-  {
-    fprintf(stderr, "Unexpected dispatcher control message: %s\n", buf);
-    return -1;
-  }
-
-  printf("[Loader] Received MIGRATION_COMPLETE from dispatcher.\n");
-  return 0;
 }
 
 // *********************************************************************************************
@@ -365,6 +308,7 @@ struct dispatcher_prog_ids
   __u32 folio_accessed_id;
   __u32 evict_folios_id;
   __u32 folio_evicted_id;
+  __u32 trigger_pull_id;
 };
 struct dispatcher_prog_fds
 {
@@ -372,6 +316,7 @@ struct dispatcher_prog_fds
   int fd_accessed;
   int fd_evict;
   int fd_evicted;
+  int fd_trigger_pull;
 };
 
 int get_dispatcher_fd_from_registry(__u64 target_cgroup_id, const char* cgroup_path,
@@ -404,14 +349,23 @@ int get_dispatcher_fd_from_registry(__u64 target_cgroup_id, const char* cgroup_p
   fds->fd_accessed = bpf_prog_get_fd_by_id(ids.folio_accessed_id);
   fds->fd_evict = bpf_prog_get_fd_by_id(ids.evict_folios_id);
   fds->fd_evicted = bpf_prog_get_fd_by_id(ids.folio_evicted_id);
+  fds->fd_trigger_pull = bpf_prog_get_fd_by_id(ids.trigger_pull_id);
 
-  printf("Service Discovery: folio_added (FD:%d), evict_folios (FD:%d)\n",
-         fds->fd_added, fds->fd_evict);
+  printf("Service Discovery: folio_added (FD:%d), evict_folios (FD:%d), dispatcher trigger_pull (FD:%d)\n",
+         fds->fd_added, fds->fd_evict, fds->fd_trigger_pull);
+
+  if (fds->fd_trigger_pull < 0)
+  {
+    fprintf(stderr, "Error: Failed to get dispatcher trigger_pull fd from registry.\n");
+    return -1;
+  }
+
   return 0;
 }
 
 // 提取出的通用挂载函数
-static int attach_prog_to_slot(struct bpf_program* prog, int host_fd, const char* func_name, int slot_id)
+static int attach_prog_to_slot(
+    struct bpf_program* prog, int host_fd, const char* func_name, int slot_id)
 {
   char slot_func_name[64];
   snprintf(slot_func_name, sizeof(slot_func_name), "slot_%s%d", func_name, slot_id);
@@ -426,7 +380,25 @@ static int attach_prog_to_slot(struct bpf_program* prog, int host_fd, const char
   return 0;
 }
 
-static int prepare_slot_hooks(struct policy_driver* policy, struct dispatcher_prog_fds* fds, int slot_id)
+// Attach freplace program directly to target function (without slot suffix)
+static int attach_prog_to_freplace_target(
+    struct bpf_program* prog, int host_fd, const char* target_func_name)
+{
+  if (!prog || !target_func_name || host_fd < 0)
+    return 0; // Skip if not available
+
+  bpf_program__set_type(prog, BPF_PROG_TYPE_EXT);
+
+  if (bpf_program__set_attach_target(prog, host_fd, target_func_name))
+  {
+    fprintf(stderr, "Failed to set attach target for freplace %s\n", target_func_name);
+    return -1;
+  }
+  return 0;
+}
+
+static int prepare_slot_hooks(
+    struct policy_driver* policy, struct dispatcher_prog_fds* fds, int slot_id)
 {
   if (attach_prog_to_slot(policy->progs.folio_added, fds->fd_added,
                           "folio_added", slot_id) < 0)
@@ -440,15 +412,35 @@ static int prepare_slot_hooks(struct policy_driver* policy, struct dispatcher_pr
   if (attach_prog_to_slot(policy->progs.folio_evicted, fds->fd_evicted,
                           "folio_evicted", slot_id) < 0)
     return -1;
+
+  if (slot_id == 1)
+  {
+    if (policy->progs.slot_pop && fds->fd_trigger_pull > 0)
+    {
+      if (attach_prog_to_freplace_target(
+              policy->progs.slot_pop, fds->fd_trigger_pull, "slot_pop") < 0)
+        fprintf(stderr, "Warning: Failed to attach old policy slot_pop\n");
+    }
+    if (policy->progs.slot_push)
+      bpf_program__set_autoload(policy->progs.slot_push, false);
+  }
+  else if (slot_id == 2)
+  {
+    if (policy->progs.slot_push && fds->fd_trigger_pull > 0)
+    {
+      if (attach_prog_to_freplace_target(
+              policy->progs.slot_push, fds->fd_trigger_pull, "slot_push") < 0)
+        fprintf(stderr, "Warning: Failed to attach new policy slot_push\n");
+    }
+    if (policy->progs.slot_pop)
+      bpf_program__set_autoload(policy->progs.slot_pop, false);
+  }
+
   return 0;
 }
 
-static int trigger_syscall_prog(struct bpf_program* prog)
+static int trigger_syscall_prog_fd(int prog_fd)
 {
-  if (!prog)
-    return -1;
-
-  int prog_fd = bpf_program__fd(prog);
   if (prog_fd < 0)
   {
     fprintf(stderr, "Invalid trigger_pull prog fd\n");
@@ -466,93 +458,37 @@ static int trigger_syscall_prog(struct bpf_program* prog)
   return opts.retval;
 }
 
-static int trigger_cgroup_iterator(const char* cgroup_path, struct bpf_program* prog)
+static int run_state_migration_round(int dispatcher_pull_prog_fd, enum ipc_cmd phase)
 {
-  if (!cgroup_path || !prog)
-  {
-    fprintf(stderr, "Error: Invalid arguments to trigger_cgroup_iterator\n");
-    return -1;
-  }
-  int cgroup_fd = open(cgroup_path, O_RDONLY);
-  if (cgroup_fd < 0)
-  {
-    fprintf(stderr, "Failed to open cgroup path %s: %s\n", cgroup_path, strerror(errno));
-    return -1;
-  }
-  DECLARE_LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-  struct bpf_iter_link_info_kern linfo = {};
-  linfo.cgroup.cgroup_fd = cgroup_fd;
-  linfo.cgroup.order = BPF_CGROUP_ITER_SELF_ONLY;
-  opts.link_info = &linfo;
-  opts.link_info_len = sizeof(linfo);
-
-  // 1. 挂载迭代器程序
-  struct bpf_link* iter_link = bpf_program__attach_iter(prog, &opts);
-  if (!iter_link)
-  {
-    perror("Failed to attach iterator program");
-    close(cgroup_fd);
-    return -1;
-  }
-  // 2. 创建迭代器文件描述符
-  int ret = -1;
-  int iter_fd = bpf_iter_create(bpf_link__fd(iter_link));
-  if (iter_fd >= 0)
-  {
-    char buf[16];
-    ssize_t bytes;
-
-    while ((bytes = read(iter_fd, buf, sizeof(buf))) > 0)
-    {
-    }
-    if (bytes < 0)
-      perror("Read iterator error");
-    else
-    {
-      printf("Iterator pipeline execution finished.\n");
-      ret = 0; // 成功执行完毕
-    }
-    close(iter_fd);
-  }
-  else
-    perror("Failed to create iter fd");
-
-  bpf_link__destroy(iter_link);
-  close(cgroup_fd);
-  return ret;
-}
-
-static int run_state_migration_round(const char* cgroup_path,
-                                     struct bpf_program* push_prog,
-                                     struct bpf_program* pull_prog,
-                                     const char* phase_name)
-{
-  printf("[%s] Starting asynchronous state migration...\n", phase_name);
-  if (trigger_cgroup_iterator(cgroup_path, push_prog) < 0)
-  {
-    fprintf(stderr, "[%s] Failed to execute migration pipeline.\n", phase_name);
-    return -1;
-  }
-
   int total_pulled = 0;
-  while (1)
+  // 全部迁移
+  if (phase == CMD_MIGRATION_COMPLETE)
+    while (1)
+    {
+      int count = trigger_syscall_prog_fd(dispatcher_pull_prog_fd);
+      if (count < 0)
+      {
+        fprintf(stderr, "[Final] Error occurred during data pull.\n");
+        return -1;
+      }
+      if (count == 0)
+        break;
+      total_pulled += count;
+      printf("[Final] Pulled %d folios (Total: %d)...\n",
+             count, total_pulled);
+    }
+  // 以p进度迁移
+  else if (phase == CMD_MIGRATION_PROGRESS)
   {
-    int count = trigger_syscall_prog(pull_prog);
-
+    int count = trigger_syscall_prog_fd(dispatcher_pull_prog_fd);
     if (count < 0)
     {
-      fprintf(stderr, "[%s] Error occurred during data pull.\n", phase_name);
+      fprintf(stderr, "[Progress] Error occurred during data pull.\n");
       return -1;
     }
-    if (count == 0)
-      break;
-
     total_pulled += count;
-    printf("[%s] Pulled %d folios (Total: %d)...\n",
-           phase_name, count, total_pulled);
+    printf("[Progress] Migration round completed. total=%d\n", total_pulled);
   }
-
-  printf("[%s] Migration round completed. total=%d\n", phase_name, total_pulled);
   return 0;
 }
 
@@ -560,9 +496,6 @@ int main(int argc, char** argv)
 {
   struct cmdline_args args = {0};
   int ret = 1;
-  int shared_qstate_fd = -1;
-  int shared_queue_fd = -1;
-  struct loader_server loader_server = {.listen_fd = -1};
 
   if (argp_parse(&argp, argc, argv, 0, 0, &args))
     return 1;
@@ -583,14 +516,19 @@ int main(int argc, char** argv)
 
   // 查找内核中 Dispatcher 的主入口名称
   __u64 target_cgroup_id = st.st_ino;
+  struct loader_server loader_server = {.cgroup_id = target_cgroup_id};
 
-  if (build_server(&loader_server, target_cgroup_id) < 0)
+  char socket_path[PATH_MAX];
+  snprintf(socket_path, sizeof(socket_path),
+           LOADER_CONTROL_SOCKET_PATH, target_cgroup_id);
+
+  if (build_ipc_server(&loader_server.ipc, socket_path) < 0)
   {
     fprintf(stderr, "Failed to build loader control server.\n");
     goto cleanup;
   }
 
-  struct dispatcher_prog_fds fds = {-1, -1, -1, -1};
+  struct dispatcher_prog_fds fds = {-1, -1, -1, -1, -1};
   if (get_dispatcher_fd_from_registry(
           target_cgroup_id, args.cgroup_path, &fds) < 0)
     goto cleanup;
@@ -624,20 +562,6 @@ int main(int argc, char** argv)
     goto cleanup;
   }
 
-  int old_qstate_fd = bpf_map__fd(old_policy.maps.migration_qstate_map);
-  int old_queue_fd = bpf_map__fd(old_policy.maps.migration_queue);
-  if (old_qstate_fd < 0 || old_queue_fd < 0)
-  {
-    fprintf(stderr, "Error: Failed to extract shared Map FDs from old policy.\n");
-    goto cleanup;
-  }
-  if (bpf_map__reuse_fd(new_policy.maps.migration_qstate_map, old_qstate_fd) < 0 ||
-      bpf_map__reuse_fd(new_policy.maps.migration_queue, old_queue_fd) < 0)
-  {
-    fprintf(stderr, "Error: Failed to reuse shared maps for new policy.\n");
-    goto cleanup;
-  }
-
   if (prepare_slot_hooks(&new_policy, &fds, 2) < 0)
     goto cleanup;
 
@@ -647,28 +571,15 @@ int main(int argc, char** argv)
     goto cleanup;
   }
 
-  if (run_state_migration_round(args.cgroup_path,
-                                old_policy.progs.trigger_push,
-                                new_policy.progs.trigger_pull,
-                                "Initial") < 0)
-    goto cleanup;
+  // 通知 Dispatcher 新策略加载完毕，开始迁移
+  struct ipc_msg begin_msg = {.cmd = CMD_MIGRATION_BEGIN, .p = 0};
+  send_ipc_message(DISPATCHER_CONTROL_SOCKET_PATH, target_cgroup_id, &begin_msg);
 
-  notify_dispatcher_command(target_cgroup_id, "MIGRATION_BEGIN");
-
-  if (wait_dispatcher(&loader_server) < 0)
+  if (wait_dispatcher(&loader_server, fds.fd_trigger_pull) < 0)
   {
-    fprintf(stderr, "Failed to wait for dispatcher begin notification.\n");
+    fprintf(stderr, "Failed while waiting for dispatcher progress.\n");
     goto cleanup;
   }
-
-  if (run_state_migration_round(args.cgroup_path,
-                                old_policy.progs.trigger_push,
-                                new_policy.progs.trigger_pull,
-                                "Catch-up") < 0)
-    goto cleanup;
-
-  if (notify_dispatcher_command(target_cgroup_id, "MIGRATION_COMPLETE") == 0)
-    printf("Sent migration-complete command to Dispatcher.\n");
   // *******************************************************
 
   printf("Both policies are now attached to Dispatcher. Press [ENTER] to exit...\n");
@@ -685,11 +596,7 @@ int main(int argc, char** argv)
   ret = 0;
 
 cleanup:
-  if (shared_qstate_fd >= 0)
-    close(shared_qstate_fd);
-  if (shared_queue_fd >= 0)
-    close(shared_queue_fd);
-  destroy_server(&loader_server);
+  destroy_ipc_server(&loader_server.ipc);
   if (fds.fd_added >= 0)
     close(fds.fd_added);
   if (fds.fd_accessed >= 0)
@@ -698,6 +605,8 @@ cleanup:
     close(fds.fd_evict);
   if (fds.fd_evicted >= 0)
     close(fds.fd_evicted);
+  if (fds.fd_trigger_pull >= 0)
+    close(fds.fd_trigger_pull);
   if (old_policy.destroy)
     old_policy.destroy(&old_policy);
   if (new_policy.destroy)

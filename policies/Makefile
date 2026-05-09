@@ -50,6 +50,9 @@ $(VMLINUX_H):
 %.skel.h: %.bpf.o $(VMLINUX_H)
 	$(BPFTOOL) gen skeleton $< > $@
 
+a_dispatcher.out: a_dispatcher.c a_communication.c a_dispatcher.skel.h
+	$(CLANG) $(USERSPACE_CFLAGS) a_dispatcher.c a_communication.c -o $@ $(USERSPACE_LINKER_FLAGS)
+
 %.out: %.c %.skel.h
 	$(CLANG) $(USERSPACE_CFLAGS) $< -o $@ $(USERSPACE_LINKER_FLAGS)
 
@@ -58,5 +61,5 @@ clean:
 
 .PHONY: all clean
 
-a_user_loader.out: a_user_loader.c a_fifo_policy.skel.h a_s3fifo_policy.skel.h
-	$(CLANG) $(USERSPACE_CFLAGS) $< -o $@ $(USERSPACE_LINKER_FLAGS)
+a_user_loader.out: a_user_loader.c a_communication.c a_fifo_policy.skel.h a_s3fifo_policy.skel.h
+	$(CLANG) $(USERSPACE_CFLAGS) a_user_loader.c a_communication.c -o $@ $(USERSPACE_LINKER_FLAGS)

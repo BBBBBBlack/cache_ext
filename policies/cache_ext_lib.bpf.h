@@ -115,6 +115,7 @@ int bpf_cache_ext_list_add(u64 list, struct folio* folio) __ksym;
 int bpf_cache_ext_list_add_tail(u64 list, struct folio* folio) __ksym;
 int bpf_cache_ext_list_del(struct folio* folio) __ksym;
 int bpf_cache_ext_list_move(u64 list, struct folio* folio, bool tail) __ksym;
+struct folio* bpf_cache_ext_list_pop(u64 list, bool tail) __ksym;
 int bpf_cache_ext_list_iterate_scan(
     struct mem_cgroup* memcg, u64 list,
     int(iter_fn)(int idx, struct cache_ext_list_node* node)) __ksym;

@@ -153,145 +153,173 @@ int do_targeted_init(struct bpf_iter__cgroup* ctx)
  * ****************************************** MIGRATION *******************************************
  */
 
-static int s3fifo_push_cb(int idx, struct cache_ext_list_node* a)
+// static int s3fifo_push_cb(int idx, struct cache_ext_list_node* a)
+// {
+//   u32 state_key = 0;
+//   migration_qstate* qstate = bpf_map_lookup_elem(&migration_qstate_map, &state_key);
+//   if (!qstate)
+//     return CACHE_EXT_STOP_ITER;
+//   u32 head = READ_ONCE(qstate->head);
+//   u32 current_tail = READ_ONCE(qstate->tail);
+//   if (current_tail - head >= MIGRATION_Q_SIZE)
+//     return CACHE_EXT_STOP_ITER;
+//   u64 handle = bpf_cache_ext_folio_to_handle(a->folio, secret);
+//   u32 tail = __sync_fetch_and_add(&qstate->tail, 1);
+//   u32 q_idx = tail & (MIGRATION_Q_SIZE - 1);
+//   generic_cache_metrics metrics = {.handle = handle,
+//                                    .seq = tail + 1};
+//   long err = bpf_map_update_elem(&migration_queue, &q_idx, &metrics, BPF_ANY);
+//   if (err)
+//     return CACHE_EXT_STOP_ITER;
+//   return CACHE_EXT_CONTINUE_ITER;
+// }
+
+// SEC("iter/cgroup")
+// int trigger_push(struct bpf_iter__cgroup* ctx)
+// {
+//   struct cgroup* cgrp = ctx->cgroup;
+//   if (!cgrp)
+//     return 0;
+//   struct mem_cgroup* memcg = bpf_cgroup_to_memcg(cgrp);
+//   if (!memcg)
+//     return 0;
+//   // if (!main_list || !small_list)
+//   //   return 0;
+//   bpf_printk("[S3FIFO] Starting pipeline push for memcg...\n");
+//   bpf_cache_ext_list_iterate_scan(memcg, small_list, s3fifo_push_cb);
+//   bpf_cache_ext_list_iterate_scan(memcg, main_list, s3fifo_push_cb);
+//   return 0;
+// }
+
+// // TODO： 处理页面被old policy驱逐后，迁移回新policy的情况
+// // 兼容 FIFO(仅存活时间), LRU(有最近访问时间), LFU/ARC(有真实频次)
+// static __always_inline int
+// __s3fifo_add_folio(struct folio* folio,
+//                    generic_cache_metrics* migrated_metrics)
+// {
+//   if (!migrated_metrics || ensure_initialized_by_folio(folio) < 0)
+//     return -1;
+//   if (!folio_test_lru(folio) || !folio->mapping)
+//     return 0;
+//   u64 key = (u64)folio;
+//   struct folio_metadata new_meta = {0};
+//   u64 list_to_add;
+//   folio_in_ghost(folio);
+//   new_meta.freq = (migrated_metrics->freq >= 3) ? 3 : migrated_metrics->freq;
+//   new_meta.in_main = true;
+//   list_to_add = main_list;
+//   if (bpf_map_update_elem((struct bpf_map*)&folio_metadata_map, &key, &new_meta, BPF_NOEXIST))
+//     return 0;
+//   int ret = bpf_cache_ext_list_add_tail(list_to_add, folio);
+//   if (ret)
+//   {
+//     bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
+//     return -1;
+//   }
+//   __sync_fetch_and_add(&main_list_size, 1);
+//   return 0;
+// }
+
+// SEC("syscall")
+// int trigger_pull(void* ctx)
+// {
+//   // struct cgroup* cgrp = ctx->cgroup;
+//   // if (!cgrp)
+//   //   return 0;
+//   // struct mem_cgroup* memcg = bpf_cgroup_to_memcg(cgrp);
+//   // if (!memcg)
+//   //   return 0;
+//   u32 state_key = 0;
+//   migration_qstate* qstate = bpf_map_lookup_elem(&migration_qstate_map, &state_key);
+//   if (!qstate)
+//     return 0;
+//   bpf_printk("[S3FIFO] Received pull trigger from migration queue.\n");
+//   int count = 0;
+//   for (int i = 0; i < 1024; i++)
+//   {
+//     u32 head = READ_ONCE(qstate->head);
+//     if (head == READ_ONCE(qstate->tail))
+//       break;
+//     u32 idx = head & (MIGRATION_Q_SIZE - 1);
+//     generic_cache_metrics* m = bpf_map_lookup_elem(&migration_queue, &idx);
+//     if (!m || m->seq != head + 1)
+//       break;
+//     // 必须将数据拷贝到本地栈，因为 Array 里的内存槽会被后续复用
+//     generic_cache_metrics metrics = *m;
+//     // 数据读取成功，原子移动 Head 指针 (完成 Pop 操作)
+//     if (__sync_val_compare_and_swap(&qstate->head, head, head + 1) != head)
+//       continue;
+//     struct folio* f = bpf_cache_ext_handle_to_folio(metrics.handle, secret);
+//     if (!f || !f->mapping)
+//       continue;
+//     struct folio_metadata* existing_data = get_folio_metadata(f);
+//     // TODO: 有改进空间
+//     if (existing_data)
+//     {
+//       u64 key = (u64)f;
+//       bpf_cache_ext_map_inc((struct bpf_map*)&folio_metadata_map, &key, sizeof(key),
+//                             __builtin_offsetof(struct folio_metadata, freq), 3);
+//       continue;
+//     }
+//     // bpf_printk("Checking migration queue: head=%u, tail=%u\n",
+//     //            READ_ONCE(qstate->head), READ_ONCE(qstate->tail));
+//     if (__s3fifo_add_folio(f, &metrics) == 0)
+//     {
+//       count++;
+//     }
+//   }
+//   return count;
+// }
+
+SEC("freplace/slot_pop")
+u64 s3fifo_pop(void)
 {
-  u32 state_key = 0;
-  migration_qstate* qstate = bpf_map_lookup_elem(&migration_qstate_map, &state_key);
-  if (!qstate)
-    return CACHE_EXT_STOP_ITER;
-
-  u32 head = READ_ONCE(qstate->head);
-  u32 current_tail = READ_ONCE(qstate->tail);
-  if (current_tail - head >= MIGRATION_Q_SIZE)
-    return CACHE_EXT_STOP_ITER;
-
-  u64 handle = bpf_cache_ext_folio_to_handle(a->folio, secret);
-
-  u32 tail = __sync_fetch_and_add(&qstate->tail, 1);
-  u32 q_idx = tail & (MIGRATION_Q_SIZE - 1);
-  generic_cache_metrics metrics = {.handle = handle,
-                                   .seq = tail + 1};
-
-  long err = bpf_map_update_elem(&migration_queue, &q_idx, &metrics, BPF_ANY);
-  if (err)
-    return CACHE_EXT_STOP_ITER;
-  return CACHE_EXT_CONTINUE_ITER;
-}
-
-SEC("iter/cgroup")
-int trigger_push(struct bpf_iter__cgroup* ctx)
-{
-  struct cgroup* cgrp = ctx->cgroup;
-  if (!cgrp)
+  struct folio* folio = bpf_cache_ext_list_pop(main_list, true);
+  if (!folio)
     return 0;
-  struct mem_cgroup* memcg = bpf_cgroup_to_memcg(cgrp);
-  if (!memcg)
-    return 0;
-  // if (!main_list || !small_list)
-  //   return 0;
 
-  bpf_printk("[S3FIFO] Starting pipeline push for memcg...\n");
-  bpf_cache_ext_list_iterate_scan(memcg, small_list, s3fifo_push_cb);
-  bpf_cache_ext_list_iterate_scan(memcg, main_list, s3fifo_push_cb);
-  return 0;
-}
-
-// TODO： 处理页面被old policy驱逐后，迁移回新policy的情况
-// 兼容 FIFO(仅存活时间), LRU(有最近访问时间), LFU/ARC(有真实频次)
-static __always_inline int
-__s3fifo_add_folio(struct folio* folio,
-                   generic_cache_metrics* migrated_metrics)
-{
-  if (!migrated_metrics || ensure_initialized_by_folio(folio) < 0)
-    return -1;
-
-  if (!folio_test_lru(folio) || !folio->mapping)
-    return 0;
+  if (__sync_fetch_and_sub(&main_list_size, 1) <= 0)
+    main_list_size = 0;
 
   u64 key = (u64)folio;
+  bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
+
+  return bpf_cache_ext_folio_to_handle(folio, secret);
+}
+
+SEC("freplace/slot_push")
+int s3fifo_push(u64 handle)
+{
+  struct folio* f = bpf_cache_ext_handle_to_folio(handle, secret);
+  if (!f || !folio_test_lru(f) || !f->mapping)
+    return 0;
+
+  if (ensure_initialized_by_folio(f) < 0)
+    return 0;
+
+  u64 key = (u64)f;
   struct folio_metadata new_meta = {0};
   u64 list_to_add;
 
-  folio_in_ghost(folio);
-
-  new_meta.freq = (migrated_metrics->freq >= 3) ? 3 : migrated_metrics->freq;
+  // 清理 ghost，迁移页面统一保送 main_list。
+  folio_in_ghost(f);
+  new_meta.freq = 3;
   new_meta.in_main = true;
   list_to_add = main_list;
 
-  if (bpf_map_update_elem((struct bpf_map*)&folio_metadata_map, &key, &new_meta, BPF_NOEXIST))
+  if (bpf_map_update_elem((struct bpf_map*)&folio_metadata_map, &key,
+                          &new_meta, BPF_NOEXIST))
     return 0;
 
-  int ret = bpf_cache_ext_list_add_tail(list_to_add, folio);
+  int ret = bpf_cache_ext_list_add_tail(list_to_add, f);
   if (ret)
   {
     bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
-    return -1;
+    return 0;
   }
 
   __sync_fetch_and_add(&main_list_size, 1);
-
-  return 0;
-}
-
-SEC("syscall")
-int trigger_pull(void* ctx)
-{
-  // struct cgroup* cgrp = ctx->cgroup;
-  // if (!cgrp)
-  //   return 0;
-  // struct mem_cgroup* memcg = bpf_cgroup_to_memcg(cgrp);
-  // if (!memcg)
-  //   return 0;
-
-  u32 state_key = 0;
-  migration_qstate* qstate = bpf_map_lookup_elem(&migration_qstate_map, &state_key);
-  if (!qstate)
-    return 0;
-
-  bpf_printk("[S3FIFO] Received pull trigger from migration queue.\n");
-  int count = 0;
-
-  for (int i = 0; i < 1024; i++)
-  {
-    u32 head = READ_ONCE(qstate->head);
-    if (head == READ_ONCE(qstate->tail))
-      break;
-
-    u32 idx = head & (MIGRATION_Q_SIZE - 1);
-
-    generic_cache_metrics* m = bpf_map_lookup_elem(&migration_queue, &idx);
-    if (!m || m->seq != head + 1)
-      break;
-
-    // 必须将数据拷贝到本地栈，因为 Array 里的内存槽会被后续复用
-    generic_cache_metrics metrics = *m;
-
-    // 数据读取成功，原子移动 Head 指针 (完成 Pop 操作)
-    if (__sync_val_compare_and_swap(&qstate->head, head, head + 1) != head)
-      continue;
-
-    struct folio* f = bpf_cache_ext_handle_to_folio(metrics.handle, secret);
-    if (!f || !f->mapping)
-      continue;
-
-    struct folio_metadata* existing_data = get_folio_metadata(f);
-    // TODO: 有改进空间
-    if (existing_data)
-    {
-      u64 key = (u64)f;
-      bpf_cache_ext_map_inc((struct bpf_map*)&folio_metadata_map, &key, sizeof(key),
-                            __builtin_offsetof(struct folio_metadata, freq), 3);
-      continue;
-    }
-
-    // bpf_printk("Checking migration queue: head=%u, tail=%u\n",
-    //            READ_ONCE(qstate->head), READ_ONCE(qstate->tail));
-    if (__s3fifo_add_folio(f, &metrics) == 0)
-    {
-      count++;
-    }
-  }
-  return count;
+  return 1;
 }
 // *********************************************************************************************
 

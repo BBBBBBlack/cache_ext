@@ -5,32 +5,20 @@
 #include <bpf/bpf.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/un.h>
-#include <unistd.h>
 
+#include "a_communication.h"
 #include "a_uapi.h"
 
 #include "a_dispatcher.skel.h"
 #include "dir_watcher.h"
 
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
-
 #define REGISTRY_MAP_PATH "/sys/fs/bpf/dispatcher_registry"
-#define DISPATCHER_CONTROL_SOCKET_PATH "/tmp/cache_ext_dispatcher_%llu.sock"
-#define LOADER_CONTROL_SOCKET_PATH "/tmp/cache_ext_loader_%llu.sock"
 
 #define MAX_EVENTS 10
 
@@ -138,12 +126,14 @@ struct dispatcher_prog_ids
   __u32 folio_accessed_id;
   __u32 evict_folios_id;
   __u32 folio_evicted_id;
+  __u32 trigger_pull_id;
 };
 
 struct dispatcher_ring_ctx
 {
   __u64 cgroup_id;
   bool notified;
+  __u32 last_progress_p;
 };
 
 /**
@@ -220,6 +210,12 @@ void register_dispatcher(int cgroup_fd, struct a_dispatcher_bpf* skel)
   if (bpf_obj_get_info_by_fd(bpf_program__fd(skel->progs._folio_evicted), &info, &len) == 0)
     ids.folio_evicted_id = info.id;
 
+  // 获取 trigger_pull 的 ID
+  memset(&info, 0, sizeof(info));
+  len = sizeof(info);
+  if (bpf_obj_get_info_by_fd(bpf_program__fd(skel->progs.trigger_pull), &info, &len) == 0)
+    ids.trigger_pull_id = info.id;
+
   // 3. 写入注册表
   int map_fd = get_or_create_registry_map();
   if (map_fd < 0)
@@ -231,8 +227,8 @@ void register_dispatcher(int cgroup_fd, struct a_dispatcher_bpf* skel)
   }
   else
   {
-    printf("[Registry] Mapped Cgroup ID %llu -> folio_added:%u, evict_folios:%u\n",
-           cgroup_id, ids.folio_added_id, ids.evict_folios_id);
+    printf("[Registry] Mapped Cgroup ID %llu -> folio_added:%u, evict_folios:%u, trigger_pull:%u\n",
+           cgroup_id, ids.folio_added_id, ids.evict_folios_id, ids.trigger_pull_id);
   }
   close(map_fd);
 }
@@ -260,17 +256,15 @@ void unregister_dispatcher(int cgroup_fd)
 
 struct dispatcher_server
 {
-  int listen_fd;
-  int epoll_fd;
+  struct ipc_server_ctx ipc;
   int ring_epoll_fd;
-  char socket_path[PATH_MAX];
   struct dispatcher_ring_ctx ring_ctx;
   struct ring_buffer* complete_rb;
 };
 
-void handle_loader_command(struct a_dispatcher_bpf* skel, char* cmd)
+void handle_loader_command(struct a_dispatcher_bpf* skel, struct ipc_msg* msg)
 {
-  if (strcmp(cmd, "MIGRATION_BEGIN") == 0)
+  if (msg->cmd == CMD_MIGRATION_BEGIN)
   {
     skel->bss->global_ts.high_ghr_streak = 0;
     skel->bss->global_ts.low_ghr_streak = 0;
@@ -280,7 +274,7 @@ void handle_loader_command(struct a_dispatcher_bpf* skel, char* cmd)
     printf("[Dispatcher] Received MIGRATION_BEGIN. phase=%u p=%u\n",
            skel->bss->global_ts.phase, skel->bss->global_ts.p);
   }
-  else if (strcmp(cmd, "MIGRATION_COMPLETE") == 0)
+  else if (msg->cmd == CMD_MIGRATION_COMPLETE)
   {
     printf("[Dispatcher] Received MIGRATION_COMPLETE. Migration finished.\n");
   }
@@ -290,71 +284,53 @@ static int handle_loader(int listen_fd, struct a_dispatcher_bpf* skel)
 {
   while (1)
   {
-    int conn_fd;
-    char buf[128];
-
-    conn_fd = accept(listen_fd, NULL, NULL);
+    int conn_fd = accept(listen_fd, NULL, NULL);
     if (conn_fd < 0)
     {
       if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
         return 0;
-
       perror("accept");
       return -1;
     }
 
-    ssize_t n = read(conn_fd, buf, sizeof(buf) - 1);
-    if (n > 0)
+    struct ipc_msg msg;
+    // 使用 MSG_WAITALL 确保读取完整结构体，防止流式 socket 半包
+    ssize_t n = recv(conn_fd, &msg, sizeof(msg), MSG_WAITALL);
+    if (n == sizeof(msg))
     {
-      buf[n] = '\0';
-      handle_loader_command(skel, buf);
+      handle_loader_command(skel, &msg);
     }
-
     close(conn_fd);
   }
-}
-
-static int notify_loader_command(__u64 cgroup_id, const char* msg)
-{
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0)
-    return -1;
-
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-
-  char cmd_socket_path[PATH_MAX];
-
-  snprintf(cmd_socket_path, sizeof(cmd_socket_path), LOADER_CONTROL_SOCKET_PATH, cgroup_id);
-  strncpy(addr.sun_path, cmd_socket_path, sizeof(addr.sun_path) - 1);
-
-  int ret = -1;
-  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
-  {
-    if (write(fd, msg, strlen(msg)) >= 0)
-      ret = 0;
-  }
-  else
-  {
-    perror("Failed to connect to loader control socket");
-  }
-
-  close(fd);
-  return ret;
 }
 
 static int handle_bpf_dispatcher_command(void* ctx, void* data, size_t data_sz)
 {
   struct dispatcher_ring_ctx* ring_ctx = ctx;
-  if (!ring_ctx || data_sz < sizeof(u32))
+  if (!ring_ctx || data_sz < sizeof(struct migration_status_event))
     return 0;
 
-  u32 phase = *(u32*)data;
-  if (phase == PHASE_COMPLETE && !ring_ctx->notified)
+  struct migration_status_event* event = data;
+  if (event->phase != PHASE_COMPLETE && event->p != ring_ctx->last_progress_p)
+  {
+    ring_ctx->last_progress_p = event->p;
+    struct ipc_msg msg = {.cmd = CMD_MIGRATION_PROGRESS, .p = event->p};
+    if (send_ipc_message(LOADER_CONTROL_SOCKET_PATH, ring_ctx->cgroup_id, &msg) == 0)
+      printf("[Dispatcher] Forwarded progress %u to loader.\n", event->p);
+  }
+
+  if (event->phase == PHASE_COMPLETE && !ring_ctx->notified)
   {
     ring_ctx->notified = true;
-    if (notify_loader_command(ring_ctx->cgroup_id, "MIGRATION_COMPLETE") == 0)
+    if (event->p != ring_ctx->last_progress_p)
+    {
+      ring_ctx->last_progress_p = event->p;
+      struct ipc_msg progress_msg = {.cmd = CMD_MIGRATION_PROGRESS, .p = event->p};
+      send_ipc_message(LOADER_CONTROL_SOCKET_PATH, ring_ctx->cgroup_id, &progress_msg);
+    }
+
+    struct ipc_msg complete_msg = {.cmd = CMD_MIGRATION_COMPLETE, .p = 0};
+    if (send_ipc_message(LOADER_CONTROL_SOCKET_PATH, ring_ctx->cgroup_id, &complete_msg) == 0)
       printf("[Dispatcher] Forwarded COMPLETE event to loader.\n");
   }
   return 0;
@@ -371,30 +347,10 @@ static int handle_bpf_dispatcher(struct ring_buffer* complete_rb)
   return 0;
 }
 
-static int add_epoll_fd(int epoll_fd, int fd)
-{
-  struct epoll_event ev;
-  memset(&ev, 0, sizeof(ev));
-
-  ev.events = EPOLLIN; // 监听事件类型：可读事件
-  ev.data.fd = fd;
-
-  // 将 fd 插入到 epoll_fd 内部的红黑树中，按照 ev 设定的规则开始监控
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0)
-  {
-    perror("epoll_ctl add failed");
-    return -1;
-  }
-
-  return 0;
-}
-
 static int build_server(int cgroup_fd, struct a_dispatcher_bpf* skel,
                         struct dispatcher_server* server)
 {
   memset(server, 0, sizeof(*server));
-  server->listen_fd = -1;
-  server->epoll_fd = -1;
   server->ring_epoll_fd = -1;
 
   struct bpf_map* complete_events_map =
@@ -402,12 +358,13 @@ static int build_server(int cgroup_fd, struct a_dispatcher_bpf* skel,
   if (!complete_events_map)
   {
     fprintf(stderr, "Failed to find migration_complete_events map\n");
-    return -1;
+    goto cleanup;
   }
 
   __u64 cgroup_id = get_cgroup_id(cgroup_fd);
   server->ring_ctx.cgroup_id = cgroup_id;
   server->ring_ctx.notified = false;
+  server->ring_ctx.last_progress_p = 0;
 
   // ring buffer
   server->complete_rb = ring_buffer__new(bpf_map__fd(complete_events_map),
@@ -415,79 +372,48 @@ static int build_server(int cgroup_fd, struct a_dispatcher_bpf* skel,
   if (!server->complete_rb)
   {
     fprintf(stderr, "Failed to create ring buffer for COMPLETE events\n");
-    return -1;
+    goto cleanup;
   }
   server->ring_epoll_fd = ring_buffer__epoll_fd(server->complete_rb);
   if (server->ring_epoll_fd < 0)
   {
     fprintf(stderr, "Failed to get ring buffer epoll fd\n");
-    return -1;
+    goto cleanup;
   }
+
   // socket
-  server->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (server->listen_fd < 0)
-  {
-    perror("Failed to create command socket");
-    return -1;
-  }
-
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-
-  snprintf(server->socket_path, sizeof(server->socket_path),
+  char socket_path[PATH_MAX];
+  snprintf(socket_path, sizeof(socket_path),
            DISPATCHER_CONTROL_SOCKET_PATH, cgroup_id);
-  unlink(server->socket_path);
-  strncpy(addr.sun_path, server->socket_path, sizeof(addr.sun_path) - 1);
-
-  int flags = fcntl(server->listen_fd, F_GETFL, 0);
-  if (flags >= 0)
-    fcntl(server->listen_fd, F_SETFL, flags | O_NONBLOCK);
-
-  if (bind(server->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
-  {
-    perror("Failed to bind command socket");
-    return -1;
-  }
-
-  if (listen(server->listen_fd, 5) < 0)
-  {
-    perror("Failed to listen on command socket");
-    return -1;
-  }
-
-  server->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-  if (server->epoll_fd < 0)
-  {
-    perror("Failed to create epoll instance");
-    return -1;
-  }
-
-  if (add_epoll_fd(server->epoll_fd, server->listen_fd) < 0)
-    return -1;
-  if (add_epoll_fd(server->epoll_fd, server->ring_epoll_fd) < 0)
-    return -1;
+  if (build_ipc_server(&server->ipc, socket_path) < 0)
+    goto cleanup;
+  if (add_epoll_fd(server->ipc.epoll_fd, server->ring_epoll_fd) < 0)
+    goto cleanup;
 
   return 0;
+
+cleanup:
+  if (server->complete_rb)
+  {
+    ring_buffer__free(server->complete_rb);
+    server->complete_rb = NULL;
+  }
+  destroy_ipc_server(&server->ipc);
+  return -1;
 }
 
 static void destroy_dispatcher_command_server(struct dispatcher_server* server)
 {
-  if (server->epoll_fd >= 0)
-    close(server->epoll_fd);
   if (server->complete_rb)
     ring_buffer__free(server->complete_rb);
-  if (server->listen_fd >= 0)
-    close(server->listen_fd);
-  if (server->socket_path[0] != '\0')
-    unlink(server->socket_path);
+  destroy_ipc_server(&server->ipc);
 }
 
 static int dispatcher_command_server_step(struct dispatcher_server* server,
                                           struct a_dispatcher_bpf* skel)
 {
   struct epoll_event events[MAX_EVENTS];
-  int n = epoll_wait(server->epoll_fd, events, MAX_EVENTS, -1);
+  int n = epoll_wait(server->ipc.epoll_fd, events, MAX_EVENTS, -1);
   if (n < 0)
   {
     if (errno == EINTR)
@@ -501,9 +427,9 @@ static int dispatcher_command_server_step(struct dispatcher_server* server,
   {
     int ready_fd = events[i].data.fd;
     // 有新连接到达时触发
-    if (ready_fd == server->listen_fd)
+    if (ready_fd == server->ipc.listen_fd)
     {
-      if (handle_loader(server->listen_fd, skel) < 0)
+      if (handle_loader(server->ipc.listen_fd, skel) < 0)
         return -1;
     }
     else if (ready_fd == server->ring_epoll_fd)

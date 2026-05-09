@@ -38,6 +38,12 @@ struct ghost_window_stats_uapi
   struct bpf_spin_lock lock;
 };
 
+struct migration_status_event
+{
+  __u32 phase;
+  __u32 p;
+};
+
 enum
 {
   PHASE_OFF = 0,

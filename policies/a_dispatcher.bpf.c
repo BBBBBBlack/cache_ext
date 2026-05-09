@@ -34,13 +34,15 @@ struct
   __uint(max_entries, 4096);
 } migration_complete_events SEC(".maps");
 
-static __always_inline void notify_migration_complete(void)
+static __always_inline void notify_migration_status(u32 phase, u32 p)
 {
-  u32* event = bpf_ringbuf_reserve(&migration_complete_events, sizeof(*event), 0);
+  struct migration_status_event* event =
+      bpf_ringbuf_reserve(&migration_complete_events, sizeof(*event), 0);
   if (!event)
     return;
 
-  *event = PHASE_COMPLETE;
+  event->phase = phase;
+  event->p = p;
   bpf_ringbuf_submit(event, 0);
 }
 
@@ -172,7 +174,9 @@ static __noinline void update_transition_state(struct transition_state* state, u
     enable_secondary_slot = false;
 
   if (new_phase == PHASE_COMPLETE && current_phase != PHASE_COMPLETE)
-    notify_migration_complete();
+    notify_migration_status(PHASE_COMPLETE, SCALE);
+  else if (new_phase != current_phase || new_p != current_p)
+    notify_migration_status(new_phase, new_p);
 }
 
 // *********************** Ghost Map ***********************
@@ -387,6 +391,52 @@ slot_folio_added2(u64 handle)
   return 0;
 }
 
+__attribute__((weak, visibility("default")))
+__noinline u64
+slot_pop(void)
+{
+  u64 ret = 0;
+  asm volatile("" : "+r"(ret));
+  return ret;
+}
+
+// return >0 if push successful, 0 if push failed
+__attribute__((weak, visibility("default")))
+__noinline int
+slot_push(u64 handle)
+{
+  asm volatile("" : : "r"(handle));
+  return 0;
+}
+
+SEC("syscall")
+int trigger_pull(void* ctx)
+{
+  u64 routing_core = READ_ONCE(global_ts.routing_core);
+  u32 phase = 0, p = 0;
+  dispatcher_unpack_routing_core(routing_core, &phase, &p);
+
+  if (phase == PHASE_COMPLETE)
+    return 0;
+  if (p > SCALE)
+    p = SCALE;
+  u32 limit = (1024 * p) / SCALE;
+
+  int count = 0;
+  for (int i = 0; i < 1024; i++)
+  {
+    if (count >= limit)
+      break;
+    u64 handle = slot_pop();
+    if (!handle)
+      break;
+    // slot_push: >0 means migrated successfully.
+    if (slot_push(handle) > 0)
+      count++;
+  }
+  return count;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(_init, struct mem_cgroup* memcg)
 {
   // 初始化状态机
@@ -459,18 +509,17 @@ void BPF_STRUCT_OPS(_folio_accessed, struct folio* folio)
   //   return;
   u64 handle = bpf_cache_ext_folio_to_handle(folio, secret);
 
-  u64 routing_core = READ_ONCE(global_ts.routing_core);
-  u32 phase = 0, p = 0;
-  dispatcher_unpack_routing_core(routing_core, &phase, &p);
-  if (enable_secondary_slot && phase == PHASE_COMPLETE)
+  if (enable_secondary_slot)
   {
     slot_folio_accessed2(handle);
-    return;
-  }
 
+    u64 routing_core = READ_ONCE(global_ts.routing_core);
+    u32 phase = 0, p = 0;
+    dispatcher_unpack_routing_core(routing_core, &phase, &p);
+    if (phase == PHASE_COMPLETE)
+      return;
+  }
   slot_folio_accessed1(handle);
-  if (unlikely(enable_secondary_slot))
-    slot_folio_accessed2(handle);
   return;
 }
 
@@ -481,22 +530,20 @@ void BPF_STRUCT_OPS(_folio_added, struct folio* folio)
   //   return;
   u64 handle = bpf_cache_ext_folio_to_handle(folio, secret);
 
-  u64 routing_core = READ_ONCE(global_ts.routing_core);
-  u32 phase = 0, p = 0;
-  dispatcher_unpack_routing_core(routing_core, &phase, &p);
-  if (enable_secondary_slot && phase == PHASE_COMPLETE)
+  if (enable_secondary_slot)
   {
     slot_folio_added2(handle);
-    return;
-  }
 
-  slot_folio_added1(handle);
-  if (unlikely(enable_secondary_slot))
-  {
-    slot_folio_added2(handle);
+    u64 routing_core = READ_ONCE(global_ts.routing_core);
+    u32 phase = 0, p = 0;
+    dispatcher_unpack_routing_core(routing_core, &phase, &p);
+    if (phase == PHASE_COMPLETE)
+      return;
+
     bool ghost_hit = dispatcher_consume_ghost(folio);
     dispatcher_record_ghost_window_sample(ghost_hit);
   }
+  slot_folio_added1(handle);
   return;
 }
 
