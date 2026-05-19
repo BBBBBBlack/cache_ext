@@ -1,0 +1,6 @@
+/home/czf/cache_ext/results/fio_schizophrenic.csv.oracleGeneral FIFO cache size     1GiB,           846000 req, miss ratio 0.5476, byte miss ratio 0.6377, throughput 6.00 MQPS
+/home/czf/cache_ext/results/fio_schizophrenic.csv.oracleGeneral LRU cache size     1GiB,           846000 req, miss ratio 0.5042, byte miss ratio 0.5956, throughput 5.94 MQPS
+/home/czf/cache_ext/results/fio_schizophrenic.csv.oracleGeneral LFU cache size     1GiB,           846000 req, miss ratio 0.3226, byte miss ratio 0.4429, throughput 4.58 MQPS
+/home/czf/cache_ext/results/fio_schizophrenic.csv.oracleGeneral ARC cache size     1GiB,           846000 req, miss ratio 0.2802, byte miss ratio 0.4210, throughput 5.90 MQPS
+/home/czf/cache_ext/results/fio_schizophrenic.csv.oracleGeneral LHD cache size     1GiB,           846000 req, miss ratio 0.1935, byte miss ratio 0.4943, throughput 2.84 MQPS
+/home/czf/cache_ext/results/fio_schizophrenic.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,           846000 req, miss ratio 0.2499, byte miss ratio 0.4277, throughput 1.47 MQPS

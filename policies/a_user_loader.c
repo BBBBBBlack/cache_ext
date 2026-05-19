@@ -18,14 +18,14 @@
 #define REGISTRY_MAP_PATH "/sys/fs/bpf/dispatcher_registry"
 
 #ifndef BPF_CGROUP_ITER_SELF_ONLY
-enum bpf_cgroup_iter_order
-{
-  BPF_CGROUP_ITER_ORDER_UNSPEC,
-  BPF_CGROUP_ITER_SELF_ONLY,
-  BPF_CGROUP_ITER_DESCENDANTS_PRE,
-  BPF_CGROUP_ITER_DESCENDANTS_POST,
-  BPF_CGROUP_ITER_ANCESTORS_UP,
-};
+// enum bpf_cgroup_iter_order
+// {
+//   BPF_CGROUP_ITER_ORDER_UNSPEC,
+//   BPF_CGROUP_ITER_SELF_ONLY,
+//   BPF_CGROUP_ITER_DESCENDANTS_PRE,
+//   BPF_CGROUP_ITER_DESCENDANTS_POST,
+//   BPF_CGROUP_ITER_ANCESTORS_UP,
+// };
 
 // 重新定义一个兼容当前内核的结构体
 struct bpf_iter_link_info_kern
@@ -550,6 +550,19 @@ int main(int argc, char** argv)
     fprintf(stderr, "Failed to load/attach Old Policy.\n");
     goto cleanup;
   }
+
+  // ============== 新增逻辑：单策略模式判断 ==============
+  if (args.new_policy == POLICY_UNKNOWN)
+  {
+    printf("[Loader] Single policy mode active. Dispatcher and FIFO are running.\n");
+    printf("[Loader] Waiting infinitely. Press Ctrl+C to stop...\n");
+    // 保持进程存活，维持 BPF 挂载状态
+    while (1)
+      sleep(10);
+    goto cleanup;
+  }
+  // ====================================================
+
   printf("Old Policy running. Inject traffic now, then press [ENTER] to migrate...\n");
   getchar();
 
@@ -580,7 +593,17 @@ int main(int argc, char** argv)
     fprintf(stderr, "Failed while waiting for dispatcher progress.\n");
     goto cleanup;
   }
-  // *******************************************************
+
+  // *********************** Offload Old Policy ***********************
+  printf("\n[Loader] Migration fully completed. Unloading old policy to free memory...\n");
+  if (old_policy.destroy)
+  {
+    old_policy.destroy(&old_policy);
+    memset(&old_policy, 0, sizeof(old_policy));
+  }
+  printf("[Loader] Old policy successfully detached and destroyed.\n\n");
+
+  // **********************************************
 
   printf("Both policies are now attached to Dispatcher. Press [ENTER] to exit...\n");
   getchar();

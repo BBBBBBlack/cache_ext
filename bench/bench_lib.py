@@ -223,13 +223,15 @@ def enable_cache_ext_for_cgroup(cgroup=DEFAULT_CACHE_EXT_CGROUP):
 
 def delete_cgroup(cgroup):
     with suppress(subprocess.CalledProcessError):
-        run(["sudo", "cgdelete", f"memory:{cgroup}"])
+        run(["sudo", "rmdir", f"/sys/fs/cgroup/{cgroup}"], check=False)
 
 
 def recreate_cache_ext_cgroup(cgroup=DEFAULT_CACHE_EXT_CGROUP, limit_in_bytes=2 * GiB):
+    run(["sudo", "sh", "-c", "echo '+memory' > /sys/fs/cgroup/cgroup.subtree_control"])
+    
     delete_cgroup(cgroup)
     # Create cache_ext cgroup
-    run(["sudo", "cgcreate", "-g", f"memory:{cgroup}"])
+    run(["sudo", "mkdir", "-p", f"/sys/fs/cgroup/{cgroup}"])
 
     # Set memory limit for cache_ext cgroup
     run(
@@ -249,19 +251,14 @@ def recreate_cache_ext_cgroup(cgroup=DEFAULT_CACHE_EXT_CGROUP, limit_in_bytes=2 
 
 
 def recreate_baseline_cgroup(cgroup=DEFAULT_BASELINE_CGROUP, limit_in_bytes=2 * GiB):
+    run(["sudo", "sh", "-c", "echo '+memory' > /sys/fs/cgroup/cgroup.subtree_control"])
+
     delete_cgroup(cgroup)
     # Create baseline cgroup
-    run(["sudo", "cgcreate", "-g", f"memory:{cgroup}"])
-
-    # Set memory limit for baseline cgroup
-    run(
-        [
-            "sudo",
-            "sh",
-            "-c",
-            "echo %d > /sys/fs/cgroup/%s/memory.max" % (limit_in_bytes, cgroup),
-        ]
-    )
+    run(["sudo", "mkdir", "-p", f"/sys/fs/cgroup/{cgroup}"]) 
+    
+    # 设置内存限制 (v2 使用 memory.max)
+    run(["sudo", "sh", "-c", "echo %d > /sys/fs/cgroup/%s/memory.max" % (limit_in_bytes, cgroup)])
 
 
 def drop_page_cache():

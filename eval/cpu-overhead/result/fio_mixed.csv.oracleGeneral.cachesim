@@ -1,0 +1,12 @@
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral FIFO cache size     1GiB,          6300905 req, miss ratio 0.7507, byte miss ratio 0.7507, throughput 6.78 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral LRU cache size     1GiB,          6300905 req, miss ratio 0.7508, byte miss ratio 0.7508, throughput 5.62 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral LFU cache size     1GiB,          6300905 req, miss ratio 0.7509, byte miss ratio 0.7509, throughput 5.74 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral ARC cache size     1GiB,          6300905 req, miss ratio 0.7510, byte miss ratio 0.7510, throughput 4.71 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral LHD cache size     1GiB,          6300905 req, miss ratio 0.7511, byte miss ratio 0.7511, throughput 2.01 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          6300905 req, miss ratio 0.7509, byte miss ratio 0.7509, throughput 1.17 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral FIFO cache size     1GiB,          6657883 req, miss ratio 0.8011, byte miss ratio 0.8011, throughput 6.00 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral LRU cache size     1GiB,          6657883 req, miss ratio 0.8011, byte miss ratio 0.8011, throughput 4.83 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral LFU cache size     1GiB,          6657883 req, miss ratio 0.8009, byte miss ratio 0.8009, throughput 5.83 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral ARC cache size     1GiB,          6657883 req, miss ratio 0.8009, byte miss ratio 0.8009, throughput 4.22 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral LHD cache size     1GiB,          6657883 req, miss ratio 0.8008, byte miss ratio 0.8008, throughput 2.00 MQPS
+/home/czf/cache_ext/results/fio_mixed.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          6657883 req, miss ratio 0.8013, byte miss ratio 0.8013, throughput 1.11 MQPS

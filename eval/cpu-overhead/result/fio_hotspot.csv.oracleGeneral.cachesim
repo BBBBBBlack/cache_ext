@@ -1,0 +1,12 @@
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral FIFO cache size     1GiB,         68548532 req, miss ratio 0.0454, byte miss ratio 0.0454, throughput 18.17 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral LRU cache size     1GiB,         68548532 req, miss ratio 0.0358, byte miss ratio 0.0358, throughput 14.19 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral LFU cache size     1GiB,         68548532 req, miss ratio 0.2452, byte miss ratio 0.2452, throughput 5.96 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral ARC cache size     1GiB,         68548532 req, miss ratio 0.0401, byte miss ratio 0.0401, throughput 14.89 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral LHD cache size     1GiB,         68548532 req, miss ratio 0.0365, byte miss ratio 0.0365, throughput 5.34 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,         68548532 req, miss ratio 0.0948, byte miss ratio 0.0948, throughput 3.86 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral FIFO cache size     1GiB,         73689081 req, miss ratio 0.0627, byte miss ratio 0.0627, throughput 19.92 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral LRU cache size     1GiB,         73689081 req, miss ratio 0.0522, byte miss ratio 0.0522, throughput 15.33 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral LFU cache size     1GiB,         73689081 req, miss ratio 0.0444, byte miss ratio 0.0444, throughput 4.98 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral ARC cache size     1GiB,         73689081 req, miss ratio 0.0461, byte miss ratio 0.0461, throughput 15.53 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral LHD cache size     1GiB,         73689081 req, miss ratio 0.0484, byte miss ratio 0.0484, throughput 5.24 MQPS
+/home/czf/cache_ext/results/fio_hotspot.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,         73689081 req, miss ratio 0.0426, byte miss ratio 0.0426, throughput 5.24 MQPS

@@ -1,0 +1,12 @@
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral FIFO cache size     1GiB,           164592 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 6.80 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral LRU cache size     1GiB,           164592 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 6.63 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral LFU cache size     1GiB,           164592 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 6.34 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral ARC cache size     1GiB,           164592 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 7.20 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral LHD cache size     1GiB,           164592 req, miss ratio 0.9979, byte miss ratio 0.9979, throughput 2.49 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,           164592 req, miss ratio 0.8116, byte miss ratio 0.8116, throughput 2.27 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral FIFO cache size     1GiB,           231146 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 8.36 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral LRU cache size     1GiB,           231146 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 8.56 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral LFU cache size     1GiB,           231146 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 8.11 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral ARC cache size     1GiB,           231146 req, miss ratio 1.0000, byte miss ratio 1.0000, throughput 8.42 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral LHD cache size     1GiB,           231146 req, miss ratio 0.9979, byte miss ratio 0.9979, throughput 2.64 MQPS
+/home/czf/cache_ext/results/fio_sequential.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,           231146 req, miss ratio 0.8131, byte miss ratio 0.8131, throughput 2.36 MQPS

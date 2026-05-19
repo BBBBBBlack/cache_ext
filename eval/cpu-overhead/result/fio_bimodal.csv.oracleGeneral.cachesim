@@ -1,0 +1,12 @@
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral FIFO cache size     1GiB,          5571270 req, miss ratio 0.7882, byte miss ratio 0.9717, throughput 6.17 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral LRU cache size     1GiB,          5571270 req, miss ratio 0.7664, byte miss ratio 0.9688, throughput 6.07 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral LFU cache size     1GiB,          5571270 req, miss ratio 0.1557, byte miss ratio 0.8873, throughput 5.29 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral ARC cache size     1GiB,          5571270 req, miss ratio 0.1301, byte miss ratio 0.8838, throughput 6.38 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral LHD cache size     1GiB,          5571270 req, miss ratio 0.0722, byte miss ratio 0.8030, throughput 4.22 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          5571270 req, miss ratio 0.4100, byte miss ratio 0.8206, throughput 1.38 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral FIFO cache size     1GiB,          5287504 req, miss ratio 0.8014, byte miss ratio 0.9755, throughput 6.20 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral LRU cache size     1GiB,          5287504 req, miss ratio 0.7820, byte miss ratio 0.9731, throughput 5.93 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral LFU cache size     1GiB,          5287504 req, miss ratio 0.1737, byte miss ratio 0.8979, throughput 6.52 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral ARC cache size     1GiB,          5287504 req, miss ratio 0.1431, byte miss ratio 0.8941, throughput 6.17 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral LHD cache size     1GiB,          5287504 req, miss ratio 0.0769, byte miss ratio 0.8115, throughput 4.62 MQPS
+/home/czf/cache_ext/results/fio_bimodal.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          5287504 req, miss ratio 0.4672, byte miss ratio 0.8313, throughput 1.35 MQPS

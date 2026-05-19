@@ -3,7 +3,7 @@
 CLANG ?= clang
 BPFTOOL ?= /usr/local/sbin/bpftool #../../tools/bpf/bpftool/bpftool
 CFLAGS = -O2 -target bpf -mcpu=v3 -D__TARGET_ARCH_$(ARCH) -c -g -Wall
-USERSPACE_CFLAGS = -O2 -fsanitize=address -g -Wall
+USERSPACE_CFLAGS = -O2 -fsanitize=address -g -Wall -I/home/czf/cache_ext/linux/include/uapi -I/home/czf/cache_ext/linux/include
 USERSPACE_LINKER_FLAGS = -L/usr/local/lib64 -lbpf
 
 # Define the BPF program source and the output object file

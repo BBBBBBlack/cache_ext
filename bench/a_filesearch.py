@@ -88,33 +88,27 @@ class FileSearchBenchmark(BenchmarkFramework):
     def benchmark_cmd(self, config):
         pattern = "write"
         data_dir = self.args.data_dir
+        cgroup_name = config["cgroup_name"]
         # rg_cmd = f"rg {pattern} {data_dir}"
         # repeated_rg_cmd = (
         #     f"for i in $(seq 1 {config['passes']}); do {rg_cmd} > /dev/null; done"
         # )
-        repeated_rg_cmd = (
+        inner_cmd = (
+            f"echo $$ | sudo tee /sys/fs/cgroup/{cgroup_name}/cgroup.procs > /dev/null; "
             f"echo '>>> [Phase 1] Loading cache...'; "
-            # f"ls -R {data_dir} > /dev/null 2>&1; "
             f"find {data_dir} -type f -exec cat {{}} + > /dev/null 2>&1; "
-            f"echo '>>> [Phase 1] Done. Sleeping...'; "
-            # f"sleep 20; "
-            f"echo '>>> [CLEANING] Dropping caches so Phase 2 triggers _folio_added...'; "
-            f"sudo /usr/bin/sync; echo 3 | sudo /usr/bin/tee /proc/sys/vm/drop_caches; " # 关键：清空缓存
+            f"echo '>>> [Phase 1] Done. Dropping caches...'; "
+            f"sudo /usr/bin/sync; echo 3 | sudo /usr/bin/tee /proc/sys/vm/drop_caches; "
             f"echo '>>> [Phase 2] Running again...'; "
-            # f"ls -R {data_dir} > /dev/null 2>&1; "
             f"find {data_dir} -type f -exec cat {{}} + > /dev/null 2>&1; "
-            f"sleep 10; "
-            f"echo '>>> Test End'"
+            f"sleep 10; echo '>>> Test End'"
         )
-        # repeated_rg_cmd = f"echo 'Test Start'; ls -R {data_dir} > /dev/null 2>&1; echo 'Sleeping...'; sleep 30; echo 'Test End'"
+
         cmd = [
             "sudo",
-            "cgexec",
-            "-g",
-            "memory:%s" % config["cgroup_name"],
             "/bin/sh",
             "-c",
-            repeated_rg_cmd,
+            inner_cmd,
         ]
         return cmd
 

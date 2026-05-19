@@ -1,0 +1,12 @@
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral FIFO cache size     1GiB,          8193536 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 5.69 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LRU cache size     1GiB,          8193536 req, miss ratio 0.9019, byte miss ratio 0.9019, throughput 4.27 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LFU cache size     1GiB,          8193536 req, miss ratio 0.9017, byte miss ratio 0.9017, throughput 5.17 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral ARC cache size     1GiB,          8193536 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 4.37 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LHD cache size     1GiB,          8193536 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 1.25 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          8193536 req, miss ratio 0.9017, byte miss ratio 0.9017, throughput 1.03 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral FIFO cache size     1GiB,          8049202 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 5.27 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LRU cache size     1GiB,          8049202 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 4.20 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LFU cache size     1GiB,          8049202 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 4.89 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral ARC cache size     1GiB,          8049202 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 3.62 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LHD cache size     1GiB,          8049202 req, miss ratio 0.9017, byte miss ratio 0.9017, throughput 1.17 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          8049202 req, miss ratio 0.9017, byte miss ratio 0.9017, throughput 1.00 MQPS
