@@ -10,3 +10,15 @@
 /home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral ARC cache size     1GiB,          8049202 req, miss ratio 0.9018, byte miss ratio 0.9018, throughput 3.62 MQPS
 /home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LHD cache size     1GiB,          8049202 req, miss ratio 0.9017, byte miss ratio 0.9017, throughput 1.17 MQPS
 /home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          8049202 req, miss ratio 0.9017, byte miss ratio 0.9017, throughput 1.00 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral FIFO cache size     1GiB,          9782439 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 5.69 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LRU cache size     1GiB,          9782439 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 4.44 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LFU cache size     1GiB,          9782439 req, miss ratio 0.9014, byte miss ratio 0.9014, throughput 5.12 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral ARC cache size     1GiB,          9782439 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 3.93 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LHD cache size     1GiB,          9782439 req, miss ratio 0.9014, byte miss ratio 0.9014, throughput 1.25 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          9782439 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 1.04 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral FIFO cache size     1GiB,          9818167 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 5.72 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LRU cache size     1GiB,          9818167 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 3.81 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LFU cache size     1GiB,          9818167 req, miss ratio 0.9014, byte miss ratio 0.9014, throughput 5.20 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral ARC cache size     1GiB,          9818167 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 3.60 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral LHD cache size     1GiB,          9818167 req, miss ratio 0.9016, byte miss ratio 0.9016, throughput 1.23 MQPS
+/home/czf/cache_ext/results/fio_legacy.csv.oracleGeneral WTinyLFU-w0.01-SLRU cache size     1GiB,          9818167 req, miss ratio 0.9015, byte miss ratio 0.9015, throughput 1.00 MQPS
