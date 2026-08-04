@@ -1,6 +1,7 @@
 [submodule "linux"]
 	path = linux
-	url = https://github.com/cache-ext/linux-cache-ext.git
+	# url = https://github.com/cache-ext/linux-cache-ext.git
+	url = git@github.com:BBBBBBlack/linux-cache-ext.git
 [submodule "leveldb"]
 	path = leveldb
 	url = https://github.com/cache-ext/leveldb.git
