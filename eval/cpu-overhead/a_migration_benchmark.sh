@@ -1,19 +1,29 @@
 #!/bin/bash
 set -eu -o pipefail
 
+# Legacy policy-migration workflow.
+# It is not automatically synchronized with the randomized benchmark generator.
+# For the current static policy-vs-baseline fio benchmarks, use:
+#   a_generate_fio_bench.sh + a_run_fio_bench.sh
+
 AVAILABLE_WORKLOADS="legacy|sequential|hotspot|mixed|bimodal|phase_shift|schizophrenic|shifting"
 AVAILABLE_POLICIES="fifo|s3fifo|lfu|lru|arc"
 
 usage() {
-    echo "用法: $0 <workload1> <workload2> <policy_a> <policy_b>"
+    echo "用法: $0 <workload1> <workload2> <policy_a> <policy_b> [options]"
     echo ""
     echo "  workload: $AVAILABLE_WORKLOADS"
     echo "  policy:   $AVAILABLE_POLICIES"
     echo ""
+    echo "可选参数:"
+    echo "  --overlap N       P2 工作集与 P1 的重叠比例 (0-100, 默认 0)"
+    echo "  --transition N    P1→P2 渐进过渡窗口秒数 (默认 0 = 硬切换)"
+    echo "  --drop-cache      在 P2 开始时刷掉 page cache (模拟零缓存污染)"
+    echo ""
     echo "示例:"
-    echo "  $0 hotspot sequential lfu fifo"
-    echo "  $0 bimodal sequential lfu fifo"
-    echo "  $0 schizophrenic legacy lfu fifo"
+    echo "  $0 bimodal shifting lfu lru"
+    echo "  $0 bimodal shifting lfu lru --overlap 50 --transition 20"
+    echo "  $0 bimodal shifting lfu lru --overlap 0 --drop-cache"
     echo ""
     echo "对比 4 组:"
     echo "  1) Baseline (无 cache_ext)"
@@ -23,7 +33,7 @@ usage() {
     exit 1
 }
 
-[[ $# -ne 4 ]] && usage
+[[ $# -lt 4 ]] && usage
 
 if ! uname -r | grep -q "cache-ext"; then
     echo "This script requires the cache_ext kernel."
@@ -34,6 +44,21 @@ WORKLOAD1="$1"
 WORKLOAD2="$2"
 POLICY_A="$3"
 POLICY_B="$4"
+shift 4
+
+# ===================== 拼接参数 =====================
+OVERLAP=0           # 0-100: P2 工作集与 P1 的重叠百分比
+TRANSITION=0        # 秒: P1→P2 渐进过渡窗口
+DROP_CACHE=false    # 在 P2 开始时是否刷掉 page cache
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --overlap)    OVERLAP="$2";    shift 2 ;;
+        --transition) TRANSITION="$2"; shift 2 ;;
+        --drop-cache) DROP_CACHE=true; shift ;;
+        *) echo "[Error] 未知选项: $1" >&2; usage ;;
+    esac
+done
 
 SCRIPT_PATH=$(realpath "$0")
 BASE_DIR=$(realpath "$(dirname "$SCRIPT_PATH")/../../")
@@ -50,14 +75,34 @@ PHASE_DURATION=90
 TOTAL_RUNTIME=$((PHASE_DURATION * 2))
 CGROUP_SIZE="1G"
 
+# P2 的起始时间 (transition>0 时提前启动，与 P1 产生重叠窗口)
+P2_BASE_DELAY=$((PHASE_DURATION - TRANSITION / 2))
+[ "$P2_BASE_DELAY" -lt 0 ] && P2_BASE_DELAY=0
+
+# 返回 P1 的热文件 (供 overlap 时 P2 复用)
+get_p1_hot_file() {
+    case "$1" in
+        bimodal)       echo "hot_data.bin:500m" ;;
+        hotspot)       echo "hotspot_data.bin:5g" ;;
+        legacy)        echo "legacy_data.bin:10g" ;;
+        mixed)         echo "mixed_data.bin:5g" ;;
+        sequential)    echo "seq_data.bin:5g" ;;
+        phase_shift)   echo "file_A.bin:1g" ;;
+        schizophrenic) echo "core.bin:200m" ;;
+        shifting)      echo "region_a.bin:1g" ;;
+    esac
+}
+
 # 输出一个 workload 的 fio job JSON 对象（可能多个，逗号分隔）
 # 用法: workload_jobs <workload_name> <phase: 1|2>
+# P2 的 startdelay 受 TRANSITION 影响 (P2_BASE_DELAY)
+# P2 的文件名受 OVERLAP 影响 (部分 region 复用 P1 的热文件)
 workload_jobs() {
     local wl="$1"
     local phase="$2"
     local rt="$PHASE_DURATION"
     local sd=""
-    [ "$phase" -eq 2 ] && sd=", \"startdelay\": $PHASE_DURATION"
+    [ "$phase" -eq 2 ] && sd=", \"startdelay\": $P2_BASE_DELAY"
 
     case "$wl" in
         legacy)
@@ -79,8 +124,8 @@ echo "{ \"name\": \"p${phase}_cold_scan\", \"numjobs\": 1, \"filename\": \"cold_
         phase_shift)
             local half=$((rt / 2))
             if [ "$phase" -eq 2 ]; then
-echo "{ \"name\": \"p${phase}_old_hotspot\", \"numjobs\": 1, \"filename\": \"file_A.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${half}, \"startdelay\": ${PHASE_DURATION} },"
-echo "{ \"name\": \"p${phase}_new_hotspot\", \"numjobs\": 1, \"filename\": \"file_B.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${half}, \"startdelay\": $((PHASE_DURATION + half)) }"
+echo "{ \"name\": \"p${phase}_old_hotspot\", \"numjobs\": 1, \"filename\": \"file_A.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${half}, \"startdelay\": ${P2_BASE_DELAY} },"
+echo "{ \"name\": \"p${phase}_new_hotspot\", \"numjobs\": 1, \"filename\": \"file_B.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${half}, \"startdelay\": $((P2_BASE_DELAY + half)) }"
             else
 echo "{ \"name\": \"p${phase}_old_hotspot\", \"numjobs\": 1, \"filename\": \"file_A.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${half} },"
 echo "{ \"name\": \"p${phase}_new_hotspot\", \"numjobs\": 1, \"filename\": \"file_B.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${half}, \"startdelay\": ${half} }"
@@ -94,11 +139,31 @@ echo "{ \"name\": \"p${phase}_background_scan\", \"numjobs\": 1, \"filename\": \
         shifting)
             local quarter=$((rt / 4))
             local base_sd=0
-            [ "$phase" -eq 2 ] && base_sd=$PHASE_DURATION
-echo "{ \"name\": \"p${phase}_region_a\", \"numjobs\": 4, \"filename\": \"region_a.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${quarter}, \"startdelay\": ${base_sd} },"
-echo "{ \"name\": \"p${phase}_region_b\", \"numjobs\": 4, \"filename\": \"region_b.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${quarter}, \"startdelay\": $((base_sd + quarter)) },"
-echo "{ \"name\": \"p${phase}_region_c\", \"numjobs\": 4, \"filename\": \"region_c.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${quarter}, \"startdelay\": $((base_sd + quarter * 2)) },"
-echo "{ \"name\": \"p${phase}_region_d\", \"numjobs\": 4, \"filename\": \"region_d.bin\", \"size\": \"1g\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${quarter}, \"startdelay\": $((base_sd + quarter * 3)) }"
+            [ "$phase" -eq 2 ] && base_sd=$P2_BASE_DELAY
+
+            # Overlap: P2 的前 N 个 region 复用 P1 的热文件
+            local -a rfiles=("region_a.bin" "region_b.bin" "region_c.bin" "region_d.bin")
+            local -a rsizes=("1g" "1g" "1g" "1g")
+            if [ "$phase" -eq 2 ] && [ "$OVERLAP" -gt 0 ]; then
+                local n_shared=$(( (OVERLAP * 4 + 50) / 100 ))
+                [ "$n_shared" -gt 4 ] && n_shared=4
+                local p1_info
+                p1_info=$(get_p1_hot_file "$WORKLOAD1")
+                local p1_file="${p1_info%%:*}"
+                local p1_size="${p1_info##*:}"
+                for ((i=0; i<n_shared; i++)); do
+                    rfiles[$i]="$p1_file"
+                    rsizes[$i]="$p1_size"
+                done
+            fi
+
+            local rnames=("region_a" "region_b" "region_c" "region_d")
+            for ((i=0; i<4; i++)); do
+                local comma=","
+                [ "$i" -eq 3 ] && comma=""
+                local job_sd=$((base_sd + quarter * i))
+echo "{ \"name\": \"p${phase}_${rnames[$i]}\", \"numjobs\": 4, \"filename\": \"${rfiles[$i]}\", \"size\": \"${rsizes[$i]}\", \"rw\": \"randread\", \"bs\": \"4k\", \"runtime\": ${quarter}, \"startdelay\": ${job_sd} }${comma}"
+            done
             ;;
         *)
             echo "[Error] Unknown workload: $wl" >&2
@@ -126,12 +191,15 @@ workload_jobs "$WORKLOAD2" 2 > /dev/null
 
 JOB_CONFIG_JSON="[ $(workload_jobs "$WORKLOAD1" 1), $(workload_jobs "$WORKLOAD2" 2) ]"
 
-SCENARIO_TAG="${WORKLOAD1}_to_${WORKLOAD2}"
+SCENARIO_TAG="${WORKLOAD1}_to_${WORKLOAD2}_o${OVERLAP}_t${TRANSITION}"
+$DROP_CACHE && SCENARIO_TAG="${SCENARIO_TAG}_dc"
 
 echo "========================================================"
 echo " Migration Benchmark"
 echo " Workload: $WORKLOAD1 (${PHASE_DURATION}s) → $WORKLOAD2 (${PHASE_DURATION}s)"
 echo " Policy:   $POLICY_A → $POLICY_B"
+echo " Overlap:  ${OVERLAP}%    Transition: ${TRANSITION}s    Drop-cache: $DROP_CACHE"
+echo " P2 start: ${P2_BASE_DELAY}s"
 echo "========================================================"
 
 mkdir -p "$FIO_DIR" "$RESULTS_PATH"
@@ -154,9 +222,29 @@ LOG_STATIC_A="$TS_LOG_DIR/2_static_${POLICY_A}"
 LOG_STATIC_B="$TS_LOG_DIR/3_static_${POLICY_B}"
 LOG_DYNAMIC="$TS_LOG_DIR/4_dynamic_${POLICY_A}_to_${POLICY_B}"
 
+# 在 fio 启动后的指定秒数刷 page cache (用于 --drop-cache)
+maybe_schedule_drop_cache() {
+    if ! $DROP_CACHE; then return; fi
+    (
+        while ! pgrep -x fio > /dev/null 2>&1; do sleep 0.2; done
+        sleep "$P2_BASE_DELAY"
+        echo "[drop-cache] Dropping page cache at P2 start (${P2_BASE_DELAY}s)..."
+        echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+    ) &
+    DROP_CACHE_PID=$!
+}
+
+wait_drop_cache() {
+    if [ -n "${DROP_CACHE_PID:-}" ]; then
+        wait "$DROP_CACHE_PID" 2>/dev/null || true
+        unset DROP_CACHE_PID
+    fi
+}
+
 run_bench() {
     local rf="$1"
     shift
+    maybe_schedule_drop_cache
     python3 "$BENCH_PATH/a_bench_fio.py" \
         --cpu 8 \
         --target-dir "$FIO_DIR" \
@@ -168,6 +256,7 @@ run_bench() {
         --ioengine "$IOENGINE" \
         --job-config "$JOB_CONFIG_JSON" \
         "$@"
+    wait_drop_cache
 }
 
 cleanup_dispatcher() {
@@ -281,10 +370,11 @@ run_static_policy "$POLICY_B" "$RESULT_STATIC_B" "$LOG_STATIC_B"
 # ====================================================================
 # [4/4] 动态切换 A → B
 # ====================================================================
-SWITCH_DELAY=$PHASE_DURATION
+# 重叠窗口 = [P2_BASE_DELAY, PHASE_DURATION]，在中点切换
+SWITCH_DELAY=$(( (P2_BASE_DELAY + PHASE_DURATION) / 2 ))
 echo ""
 echo "--------------------------------------------------------"
-echo "[4/4] Dispatcher + 动态切换 $POLICY_A → $POLICY_B (${PHASE_DURATION}s 处切换)"
+echo "[4/4] Dispatcher + 动态切换 $POLICY_A → $POLICY_B (${SWITCH_DELAY}s 处切换)"
 echo "--------------------------------------------------------"
 run_dynamic_switch "$POLICY_A" "$POLICY_B" "$SWITCH_DELAY" "$RESULT_DYNAMIC" "$LOG_DYNAMIC"
 

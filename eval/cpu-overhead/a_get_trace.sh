@@ -1,6 +1,11 @@
 #!/bin/bash
 set -eu -o pipefail
 
+# Legacy trace-generation workflow for libCacheSim.
+# For the current randomized policy-specific fio benchmarks, use:
+#   a_generate_fio_bench.sh + a_run_fio_bench.sh
+# This file intentionally keeps the older workload modes for compatibility.
+
 usage() {
     echo "用法: $0 {legacy|sequential|hotspot|mixed|bimodal}"
     echo "  legacy       传统随机读负载 (验证 MGLRU, 10G)"

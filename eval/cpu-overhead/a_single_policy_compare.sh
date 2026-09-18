@@ -1,6 +1,20 @@
 #!/bin/bash
 set -eu -o pipefail
 
+# Legacy ad-hoc single-policy workflow.
+# For the current randomized policy-specific fio benchmarks, use:
+#   a_generate_fio_bench.sh + a_run_fio_bench.sh
+# This file intentionally keeps the older workload modes for compatibility.
+
+cleanup_bg() {
+    echo "[Cleanup] 清理后台进程..."
+    sudo kill -2 ${LOADER_PID:-0} 2>/dev/null || true
+    sleep 1
+    sudo kill -2 ${DISPATCHER_PID:-0} 2>/dev/null || true
+    sleep 1
+}
+trap cleanup_bg EXIT
+
 usage() {
     echo "用法: $0 {legacy|sequential|hotspot|mixed|bimodal}"
     echo "  legacy       传统随机读负载 (验证 MGLRU, 10G)"
@@ -8,6 +22,7 @@ usage() {
     echo "  hotspot      高频热点负载 (验证 LFU/LHD, 5G, Zipf)"
     echo "  mixed        混合读写负载 (验证 ARC, 5G, 70%读)"
     echo "  bimodal      双峰扫描负载 (异构接口测试: LFU > LRU)"
+    echo "  hot_only     纯热点负载 (无 cold_scan, 测 BPF 纯开销)"
     echo "  phase shift   工作集突变负载 (LRU 获胜)"
     echo "  schizophrenic   精神分裂负载 (ARC 统治全场)"
     exit 1
@@ -120,6 +135,19 @@ case "$1" in
                 "size": "5g",
                 "rw": "read",
                 "bs": "1m"
+            }
+        ]'
+        ;;
+    hot_only)
+        JOB_CONFIG_JSON='[
+            {
+                "name": "hot_core",
+                "numjobs": 4,
+                "filename": "hot_data.bin",
+                "size": "500m",
+                "rw": "randread",
+                "bs": "4k",
+                "rate_iops": 15000
             }
         ]'
         ;;
@@ -265,8 +293,10 @@ echo "[Info] 正在发送 FIO 压测流量..."
 
 # 3.4 清理后台架构进程
 echo "[Info] 压测结束，清理 Dispatcher 和 Loader 后台进程..."
-sudo killall -9 a_user_loader.out 2>/dev/null || true
-sudo killall -9 a_dispatcher.out 2>/dev/null || true
+sudo kill -2 $LOADER_PID 2>/dev/null || true
+sleep 2
+sudo kill -2 $DISPATCHER_PID 2>/dev/null || true
+sleep 2
 sleep 1
 
 # ====================================================================

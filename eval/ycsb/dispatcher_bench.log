@@ -1,0 +1,39 @@
+[Registry] Mapped Cgroup ID 31135 -> folio_added:1264, evict_folios:1261, trigger_pull:1259
+Dispatcher is running and listening for commands...
+[Dispatcher] folio_added=24878 evict=0 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=370343 evict=0 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=892984 evict=14826 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=1666412 evict=47095 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=2434382 evict=80812 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=3221076 evict=115760 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=4007746 evict=151603 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=4659338 evict=178547 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=5057849 evict=186209 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=5562754 evict=198232 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=6321231 evict=229140 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=7044665 evict=258965 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=7782087 evict=290154 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=8520123 evict=323646 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=9248135 evict=351025 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=9986568 evict=375772 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=10728837 evict=400592 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=11458940 evict=423111 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=12171209 evict=447815 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=12825384 evict=470071 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=13460011 evict=490673 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=14090522 evict=511338 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=14744735 evict=532975 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=15404170 evict=555070 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=16045742 evict=576653 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=16704159 evict=598542 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=17343271 evict=619637 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=17988712 evict=641356 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=18615625 evict=663191 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=19268809 evict=685670 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=19956355 evict=710167 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=20609229 evict=733160 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=21284756 evict=757336 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=21899978 evict=777253 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=22171002 evict=783505 slot=1 dual=0 stub1=0
+[Dispatcher] folio_added=22171002 evict=783505 slot=1 dual=0 stub1=0
+[Registry] Unmapped Cgroup ID 31135

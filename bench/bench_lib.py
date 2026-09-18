@@ -263,7 +263,7 @@ def recreate_baseline_cgroup(cgroup=DEFAULT_BASELINE_CGROUP, limit_in_bytes=2 * 
 
 def drop_page_cache():
     run(["sudo", "sync"])
-    run(["sudo", "sh", "-c", "echo 1 > /proc/sys/vm/drop_caches"])
+    run(["sudo", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"])
 
 
 def set_sysctl(key: str, value: Union[int, str]):
@@ -275,11 +275,16 @@ def disable_swap():
 
 
 def disable_smt():
-    run(["sudo", "sh", "-c", "echo off > /sys/devices/system/cpu/smt/control"])
-
+    try:
+        run(["sudo", "sh", "-c", "echo off > /sys/devices/system/cpu/smt/control"])
+    except Exception:
+        print("[Info] SMT is already disabled at hardware level. Skipping.")
 
 def enable_smt():
-    run(["sudo", "sh", "-c", "echo on > /sys/devices/system/cpu/smt/control"])
+    try:
+        run(["sudo", "sh", "-c", "echo on > /sys/devices/system/cpu/smt/control"])
+    except Exception:
+        print("[Info] SMT is already disabled at hardware level. Skipping.")
 
 
 def rsync_folder(source_dir: str, dest_dir: str):

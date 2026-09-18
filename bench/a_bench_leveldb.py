@@ -1,90 +1,67 @@
 import argparse
+import json
 import logging
 import os
 import re
-import subprocess
 from time import sleep
 from typing import Dict, List
 
-from ruamel.yaml import YAML
+import psutil
 
-from bench_lib import (
-    CacheExtPolicy,
-    BenchmarkFramework,
-    BenchResults,
-    DEFAULT_BASELINE_CGROUP,
-    DEFAULT_CACHE_EXT_CGROUP,
-    add_config_option,
-    check_output,
-    disable_smt,
-    disable_swap,
-    drop_page_cache,
-    edit_yaml_file,
-    enable_smt,
-    format_bytes_str,
-    parse_strings_string,
-    recreate_baseline_cgroup,
-    recreate_cache_ext_cgroup,
-    run,
-    set_sysctl,
-)
+from bench_lib import *
 
-yaml = YAML()
 log = logging.getLogger(__name__)
 GiB = 2**30
-MiB = 2**20
-
-# These only run on error
 CLEANUP_TASKS = []
 
 
+def read_cgroup_pgfault(cgroup_name: str) -> dict:
+    stat_path = f"/sys/fs/cgroup/{cgroup_name}/memory.stat"
+    result = {
+        "pgfault": 0,
+        "pgmajfault": 0,
+        "pgscan": 0,
+        "pgsteal": 0,
+        "pgscan_direct": 0,
+        "pgsteal_direct": 0,
+        "workingset_refault_file": 0,
+        "workingset_activate_file": 0,
+        "workingset_restore_file": 0,
+    }
+    try:
+        with open(stat_path, "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[0] in result:
+                    result[parts[0]] = int(parts[1])
+    except FileNotFoundError:
+        pass
+    return result
+
+
+def parse_size_str(size_str: str) -> int:
+    size_str = size_str.upper()
+    if size_str.endswith('G'): return int(float(size_str[:-1]) * (1024**3))
+    if size_str.endswith('M'): return int(float(size_str[:-1]) * (1024**2))
+    if size_str.endswith('K'): return int(float(size_str[:-1]) * 1024)
+    return int(size_str)
+
+
 def reset_database(db_dir: str, temp_db_dir: str):
-    # rsync -avpl --delete /mydata/leveldb_db_orig/ /mydata/leveldb_db/
     if not db_dir.endswith("/"):
         db_dir += "/"
     run(["rsync", "-avpl", "--delete", db_dir, temp_db_dir])
 
 
-def dir_size(path: str) -> int:
-    # Check that path exists and is a directory
-    if not os.path.exists(path):
-        raise Exception("Directory not found: %s" % path)
-    if not os.path.isdir(path):
-        raise Exception("Not a directory: %s" % path)
-    cmd = ["du", "-sb", path]
-    result = check_output(cmd)
-    return int(result.split()[0])
-
-
-def file_size(path: str) -> int:
-    # Check that path exists and is a file
-    if not os.path.exists(path):
-        raise Exception("File not found: %s" % path)
-    if not os.path.isfile(path):
-        raise Exception("Not a file: %s" % path)
-    return os.path.getsize(path)
-
-
 def parse_leveldb_bench_results(stdout: str) -> Dict:
-    # Uniform: calculating overall performance metrics... (might take a while)
-    # Uniform overall: UPDATE throughput 0.00 ops/sec, INSERT throughput 0.00 ops/sec, READ throughput 9038.24 ops/sec, SCAN throughput 0.00 ops/sec, READ_MODIFY_WRITE throughput 0.00 ops/sec, total throughput 9038.24 ops/sec
-    # Uniform overall: UPDATE average latency 0.00 ns, UPDATE p99 latency 0.00 ns, INSERT average latency 0.00 ns, INSERT p99 latency 0.00 ns, READ average latency 109658.84 ns, READ p99 latency 145190.65 ns, SCAN average latency 0.00 ns, SCAN p99 latency 0.00 ns, READ_MODIFY_WRITE average latency 0.00 ns, READ_MODIFY_WRITE p99 latency 0.00 ns
     results = {}
     for line in stdout.splitlines():
         line = line.strip()
         if "Warm-Up" in line:
             continue
         elif "overall: UPDATE throughput" in line:
-            # Parse throughput
             pattern = r"(\w+ throughput) (\d+\.\d+) ops/sec"
             matches = re.findall(pattern, line)
-            # Matches look like this:
-            # [('UPDATE throughput', '0.00'),
-            #  ('INSERT throughput', '12337.23'),
-            #  ('READ throughput', '12369.98'),
-            #  ('SCAN throughput', '0.00'),
-            #  ('READ_MODIFY_WRITE throughput', '0.00'),
-            #  ('total throughput', '24707.21')]
             assert len(matches) == 6, "Unexpected line pattern: %s" % line
             assert "total throughput" in matches[-1][0]
             for match in matches:
@@ -104,20 +81,8 @@ def parse_leveldb_bench_results(stdout: str) -> Dict:
                     raise Exception("Unknown throughput type: " + match[0])
             results["throughput_avg"] = float(matches[-1][1])
         elif "overall: UPDATE average latency" in line:
-            # Parse latency
             pattern = r"(\w+ \w+ latency) (\d+\.\d+) ns"
             matches = re.findall(pattern, line)
-            # Matches look like this:
-            # [('UPDATE average latency', '0.00'),
-            #  ('UPDATE p99 latency', '0.00'),
-            #  ('INSERT average latency', '80992.84'),
-            #  ('INSERT p99 latency', '887726.24'),
-            #  ('READ average latency', '1850251.43'),
-            #  ('READ p99 latency', '6888407.68'),
-            #  ('SCAN average latency', '0.00'),
-            #  ('SCAN p99 latency', '0.00'),
-            #  ('READ_MODIFY_WRITE average latency', '0.00'),
-            #  ('READ_MODIFY_WRITE p99 latency', '0.00')]
             for match in matches:
                 if "READ average latency" in match[0]:
                     results["read_latency_avg"] = float(match[1])
@@ -150,15 +115,16 @@ def parse_leveldb_bench_results(stdout: str) -> Dict:
     return results
 
 
-class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
+class LevelDBBenchmark(BenchmarkFramework):
     def __init__(self, benchresults_cls=BenchResults, cli_args=None):
-        super().__init__("leveldb_twitter_trace_benchmark", benchresults_cls, cli_args)
+        super().__init__("leveldb_benchmark", benchresults_cls, cli_args)
         if self.args.leveldb_temp_db is None:
             self.args.leveldb_temp_db = self.args.leveldb_db + "_temp"
         self.cache_ext_policy = CacheExtPolicy(
             DEFAULT_CACHE_EXT_CGROUP, self.args.policy_loader, self.args.leveldb_temp_db
         )
-        CLEANUP_TASKS.append(lambda: self.cache_ext_policy.stop())
+        if self.args.policy_loader:
+            CLEANUP_TASKS.append(lambda: self.cache_ext_policy.stop())
 
     def add_arguments(self, parser: argparse.ArgumentParser):
         parser.add_argument(
@@ -176,8 +142,8 @@ class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
         parser.add_argument(
             "--policy-loader",
             type=str,
-            required=True,
-            help="Specify the path to the policy loader binary",
+            default="",
+            help="Path to the policy loader binary. Empty means external Dispatcher is managing policies.",
         )
         parser.add_argument(
             "--bench-binary-dir",
@@ -186,30 +152,22 @@ class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
             help="Specify the directory containing the benchmark binary",
         )
         parser.add_argument(
+            "--cgroup-size",
+            type=str,
+            default="10G",
+            help="Memory cgroup size limit, e.g., '5G', '10G'",
+        )
+        parser.add_argument(
             "--benchmark",
             type=str,
             required=True,
-            help="Specify the benchmark to run, e.g., twitter_cluster_17_bench",
+            help="Specify the benchmark to run, e.g., 'ycsb_a,ycsb_b,'",
         )
         parser.add_argument(
-            "--twitter-traces-dir",
+            "--fadvise-hints",
             type=str,
-            required=True,
-            help="Specify the directory containing Twitter trace metadata files",
-        )
-        trace_nr_op_group = parser.add_mutually_exclusive_group()
-        trace_nr_op_group.add_argument(
-            "--limit-trace-nr-op",
-            dest="trace_limit_nr_op",
-            action="store_true",
-            default=False,
-            help="For trace workloads, stop when workload.nr_op/nr_warmup_op or runtime_seconds is reached.",
-        )
-        trace_nr_op_group.add_argument(
-            "--ignore-trace-nr-op",
-            dest="trace_limit_nr_op",
-            action="store_false",
-            help="For trace workloads, ignore workload.nr_op/nr_warmup_op and stop only on runtime_seconds or trace EOF. This is the default.",
+            default="",
+            help="Specify the fadvise hints to use for the baseline cgroup, e.g., ',SEQUENTIAL,NOREUSE,DONTNEED'",
         )
 
     def generate_configs(self, configs: List[Dict]) -> List[Dict]:
@@ -219,10 +177,8 @@ class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
         configs = add_config_option(
             "benchmark", parse_strings_string(self.args.benchmark), configs
         )
-        configs = add_config_option(
-            "trace_limit_nr_op", [self.args.trace_limit_nr_op], configs
-        )
-        configs = add_config_option("cgroup_size_pct", [10], configs)
+        cgroup_bytes = parse_size_str(self.args.cgroup_size)
+        configs = add_config_option("cgroup_size", [cgroup_bytes], configs)
         if self.args.default_only:
             configs = add_config_option(
                 "cgroup_name", [DEFAULT_BASELINE_CGROUP], configs
@@ -234,11 +190,24 @@ class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
                 configs,
             )
 
-        policy_loader_name = os.path.basename(self.cache_ext_policy.loader_path)
+        fadvise_hints = parse_strings_string(self.args.fadvise_hints)
+        new_configs = []
         for config in configs:
-            if config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP:
+            if config["cgroup_name"] == DEFAULT_BASELINE_CGROUP:
+                for fadvise in fadvise_hints:
+                    new_config = config.copy()
+                    new_config["fadvise"] = fadvise
+                    new_configs.append(new_config)
+            elif config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP:
+                if self.cache_ext_policy.loader_path:
+                    policy_loader_name = os.path.basename(self.cache_ext_policy.loader_path)
+                else:
+                    policy_loader_name = "dispatcher"
                 config["policy_loader"] = policy_loader_name
-
+                new_configs.append(config)
+            else:
+                new_configs.append(config)
+        configs = new_configs
         configs = add_config_option(
             "iteration", list(range(1, self.args.iterations + 1)), configs
         )
@@ -249,50 +218,26 @@ class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
         drop_page_cache()
         disable_swap()
         disable_smt()
-        db_size = dir_size(self.args.leveldb_temp_db)
-        cgroup_size = int(db_size * config["cgroup_size_pct"] / 100)
-        # Add enough memory to load trace file into memory
-        bench_binary_dir = self.args.bench_binary_dir
-        bench_file = "../leveldb/config/%s.yaml" % config["benchmark"]
-        bench_file = os.path.abspath(os.path.join(bench_binary_dir, bench_file))
-
-        # Extract cluster number from benchmark name and construct trace file path
-        cluster_match = re.search(r"cluster(\d+)", config["benchmark"])
-        if cluster_match:
-            cluster_num = cluster_match.group(1)
-            trace_file = os.path.join(
-                self.args.twitter_traces_dir, f"cluster{cluster_num}_bench.txt"
-            )
-        else:
-            raise Exception(
-                "Could not extract cluster number from benchmark name: %s"
-                % config["benchmark"]
-            )
-
-        trace_file_size = file_size(trace_file)
-        # Load the trace file in memory to charge it to another cgroup
-        cmd = ["cat", trace_file]
-        run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # cgroup_size += int(trace_file_size * 1.5)
-        # cgroup_size *= 3
-        cgroup_size += 20 * MiB
-        cgroup_size = max(cgroup_size, 70 * MiB)
-
-        log.info(
-            "DB size: %s, trace file size: %s, cgroup size: %s",
-            format_bytes_str(db_size),
-            format_bytes_str(trace_file_size),
-            format_bytes_str(cgroup_size),
-        )
-
         if config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP:
-            recreate_cache_ext_cgroup(limit_in_bytes=cgroup_size)
-            if config["policy_loader"] == "cache_ext_s3fifo.out":
-                self.cache_ext_policy.start(cgroup_size=cgroup_size)
+            if self.cache_ext_policy.loader_path:
+                recreate_cache_ext_cgroup(limit_in_bytes=config["cgroup_size"])
+                policy_loader_name = os.path.basename(self.cache_ext_policy.loader_path)
+                if policy_loader_name == "cache_ext_s3fifo.out":
+                    self.cache_ext_policy.start(cgroup_size=config["cgroup_size"])
+                else:
+                    self.cache_ext_policy.start()
             else:
-                self.cache_ext_policy.start()
+                log.info("Using external Dispatcher, skipping policy start.")
+                cgroup_dir = f"/sys/fs/cgroup/{config['cgroup_name']}"
+                if not os.path.isdir(cgroup_dir):
+                    run(["sudo", "mkdir", "-p", cgroup_dir])
+                run(["sudo", "sh", "-c", f"echo {config['cgroup_size']} > {cgroup_dir}/memory.max"])
         else:
-            recreate_baseline_cgroup(limit_in_bytes=cgroup_size)
+            recreate_baseline_cgroup(limit_in_bytes=config["cgroup_size"])
+
+    def before_benchmark(self, config):
+        psutil.cpu_percent(percpu=True)
+        self.pgfault_before = read_cgroup_pgfault(config["cgroup_name"])
 
     def benchmark_cmd(self, config):
         bench_binary_dir = self.args.bench_binary_dir
@@ -302,28 +247,12 @@ class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
         bench_file = os.path.abspath(os.path.join(bench_binary_dir, bench_file))
         if not os.path.exists(bench_file):
             raise Exception("Benchmark file not found: %s" % bench_file)
-
-        # Extract cluster number from benchmark name (e.g., "twitter_cluster_17_bench" -> "17")
-        cluster_match = re.search(r"cluster(\d+)", config["benchmark"])
-        if cluster_match:
-            cluster_num = cluster_match.group(1)
-            trace_file_path = os.path.join(
-                self.args.twitter_traces_dir, f"cluster{cluster_num}_bench.txt"
-            )
-        else:
-            raise Exception(
-                "Could not extract cluster number from benchmark name: %s"
-                % config["benchmark"]
-            )
-
         with edit_yaml_file(bench_file) as bench_config:
             bench_config["leveldb"]["data_dir"] = leveldb_temp_db_dir
             bench_config["workload"]["runtime_seconds"] = config["runtime_seconds"]
             bench_config["workload"]["warmup_runtime_seconds"] = config[
                 "warmup_runtime_seconds"
             ]
-            bench_config["workload"]["trace_file"] = trace_file_path
-            bench_config["workload"]["trace_limit_nr_op"] = config["trace_limit_nr_op"]
         cmd = [
             "sudo",
             "cgexec",
@@ -343,32 +272,59 @@ class LevelDBTwitterTraceBenchmark(BenchmarkFramework):
             extra_envs["ENABLE_BPF_SCAN_MAP"] = "1"
         if config["enable_mmap"]:
             extra_envs["LEVELDB_MAX_MMAPS"] = "10000"
+        if config["cgroup_name"] == DEFAULT_BASELINE_CGROUP and config["fadvise"] != "":
+            extra_envs["ENABLE_SCAN_FADVISE"] = config["fadvise"]
         return extra_envs
 
     def after_benchmark(self, config):
+        self.cpu_usage = sum(psutil.cpu_percent(percpu=True)[:config["cpus"]])
+        pgfault_after = read_cgroup_pgfault(config["cgroup_name"])
+        self.pgfault = pgfault_after["pgfault"] - self.pgfault_before["pgfault"]
+        self.pgmajfault = pgfault_after["pgmajfault"] - self.pgfault_before["pgmajfault"]
+        self.pgscan = pgfault_after["pgscan"] - self.pgfault_before["pgscan"]
+        self.pgsteal = pgfault_after["pgsteal"] - self.pgfault_before["pgsteal"]
+        self.pgscan_direct = pgfault_after["pgscan_direct"] - self.pgfault_before["pgscan_direct"]
+        self.pgsteal_direct = pgfault_after["pgsteal_direct"] - self.pgfault_before["pgsteal_direct"]
+        self.workingset_refault_file = pgfault_after["workingset_refault_file"] - self.pgfault_before["workingset_refault_file"]
+        self.workingset_activate_file = pgfault_after["workingset_activate_file"] - self.pgfault_before["workingset_activate_file"]
+        self.workingset_restore_file = pgfault_after["workingset_restore_file"] - self.pgfault_before["workingset_restore_file"]
         if config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP:
-            self.cache_ext_policy.stop()
+            if self.cache_ext_policy.loader_path:
+                self.cache_ext_policy.stop()
+                delete_cgroup(config["cgroup_name"])
+        elif config["cgroup_name"] != DEFAULT_CACHE_EXT_CGROUP:
+            delete_cgroup(config["cgroup_name"])
         sleep(2)
         enable_smt()
 
     def parse_results(self, stdout: str) -> BenchResults:
         results = parse_leveldb_bench_results(stdout)
+        results["cpu_usage"] = self.cpu_usage
+        results["pgfault"] = self.pgfault
+        results["pgmajfault"] = self.pgmajfault
+        results["pgscan"] = self.pgscan
+        results["pgsteal"] = self.pgsteal
+        results["pgscan_direct"] = self.pgscan_direct
+        results["pgsteal_direct"] = self.pgsteal_direct
+        results["workingset_refault_file"] = self.workingset_refault_file
+        results["workingset_activate_file"] = self.workingset_activate_file
+        results["workingset_restore_file"] = self.workingset_restore_file
         return BenchResults(results)
 
 
 def main():
     global log
-    leveldb_bench = LevelDBTwitterTraceBenchmark()
+    disable_swap()
+    disable_smt()
+    leveldb_bench = LevelDBBenchmark()
     set_sysctl("vm.dirty_background_ratio", 1)
     set_sysctl("vm.dirty_ratio", 30)
     CLEANUP_TASKS.append(lambda: set_sysctl("vm.dirty_background_ratio", 10))
     CLEANUP_TASKS.append(lambda: set_sysctl("vm.dirty_ratio", 20))
-    # Check that leveldb path exists
     if not os.path.exists(leveldb_bench.args.leveldb_db):
         raise Exception(
             "LevelDB DB directory not found: %s" % leveldb_bench.args.leveldb_db
         )
-    # Check that bench_binary_dir exists
     if not os.path.exists(leveldb_bench.args.bench_binary_dir):
         raise Exception(
             "Benchmark binary directory not found: %s"
@@ -378,7 +334,6 @@ def main():
     log.info("LevelDB temp DB directory: %s", leveldb_bench.args.leveldb_temp_db)
     leveldb_bench.benchmark()
 
-    # Reset to default
     set_sysctl("vm.dirty_background_ratio", 10)
     set_sysctl("vm.dirty_ratio", 20)
 

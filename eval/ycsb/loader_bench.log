@@ -1,0 +1,77 @@
+Service Discovery: folio_added (FD:5), evict_folios (FD:7), dispatcher trigger_pull (FD:9)
+[Loader-Diag] LFU links: added=0x503000006af0 accessed=0x503000006ac0 evict=0x503000006a60 evicted=0x503000006a90 pop=0x503000006a30 push=(nil) init=(nil)
+[Loader-Diag] LFU prog fds: added=18 accessed=17 evict=15 evicted=16
+[Loader] Single policy mode active. Dispatcher and FIFO are running.
+[Loader] Waiting infinitely. Press Ctrl+C to stop...
+[Loader] call_count=55582 evict_count=0
+[Loader-LFU-Debug] req=0 returned=0 score_calls=0 ok=0 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=0 skip_writeback=0
+[Loader] call_count=433955 evict_count=964
+[Loader-LFU-Debug] req=18798 returned=18798 score_calls=187980 ok=187980 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=33 skip_writeback=0
+[Loader] call_count=1025726 evict_count=19688
+[Loader-LFU-Debug] req=434524 returned=434516 score_calls=4345160 ok=4345160 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=9985 skip_writeback=0
+[Loader] call_count=1797728 evict_count=52823
+[Loader-LFU-Debug] req=1024640 returned=1024640 score_calls=10246400 ok=10246400 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=35554 skip_writeback=0
+[Loader] call_count=2565591 evict_count=86703
+[Loader-LFU-Debug] req=1604218 returned=1604218 score_calls=16042180 ok=16042178 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=59668 skip_writeback=2
+[Loader] call_count=3350604 evict_count=121583
+[Loader-LFU-Debug] req=2198954 returned=2198954 score_calls=21989540 ok=21989538 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=83585 skip_writeback=2
+[Loader] call_count=4137437 evict_count=157673
+[Loader-LFU-Debug] req=2795507 returned=2795507 score_calls=27955070 ok=27955068 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=109551 skip_writeback=2
+[Loader] call_count=4725571 evict_count=180042
+[Loader-LFU-Debug] req=3172394 returned=3172394 score_calls=31723940 ok=31723938 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=127683 skip_writeback=2
+[Loader] call_count=5124973 evict_count=187452
+[Loader-LFU-Debug] req=3344585 returned=3344585 score_calls=33445850 ok=33445848 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=138160 skip_writeback=2
+[Loader] call_count=5684001 evict_count=203118
+[Loader-LFU-Debug] req=3698001 returned=3698001 score_calls=36980010 ok=36980008 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=156124 skip_writeback=2
+[Loader] call_count=6433775 evict_count=234359
+[Loader-LFU-Debug] req=4248771 returned=4248771 score_calls=42487710 ok=42487708 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=179578 skip_writeback=2
+[Loader] call_count=7158336 evict_count=263863
+[Loader-LFU-Debug] req=4782347 returned=4782347 score_calls=47823470 ok=47823468 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=202948 skip_writeback=2
+[Loader] call_count=7912005 evict_count=296346
+[Loader-LFU-Debug] req=5337401 returned=5337401 score_calls=53374010 ok=53374008 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=229433 skip_writeback=2
+[Loader] call_count=8632180 evict_count=328537
+[Loader-LFU-Debug] req=5869891 returned=5869891 score_calls=58698910 ok=58698908 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=250929 skip_writeback=2
+[Loader] call_count=9369523 evict_count=354955
+[Loader-LFU-Debug] req=6418735 returned=6418735 score_calls=64187350 ok=64187348 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=276069 skip_writeback=2
+[Loader] call_count=10114018 evict_count=381013
+[Loader-LFU-Debug] req=6964773 returned=6964773 score_calls=69647730 ok=69647728 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=300551 skip_writeback=2
+[Loader] call_count=10851401 evict_count=404589
+[Loader-LFU-Debug] req=7512894 returned=7512894 score_calls=75128940 ok=75128938 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=324515 skip_writeback=2
+[Loader] call_count=11566623 evict_count=427344
+[Loader-LFU-Debug] req=8037098 returned=8037098 score_calls=80370980 ok=80370978 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=346712 skip_writeback=2
+[Loader] call_count=12278939 evict_count=451659
+[Loader-LFU-Debug] req=8560941 returned=8560941 score_calls=85609410 ok=85609408 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=369989 skip_writeback=2
+[Loader] call_count=12916538 evict_count=473189
+[Loader-LFU-Debug] req=9008412 returned=9008412 score_calls=90084120 ok=90084118 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=391242 skip_writeback=2
+[Loader] call_count=13550841 evict_count=493774
+[Loader-LFU-Debug] req=9445801 returned=9445801 score_calls=94458010 ok=94458008 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=412028 skip_writeback=2
+[Loader] call_count=14190055 evict_count=514885
+[Loader-LFU-Debug] req=9892283 returned=9892283 score_calls=98922830 ok=98922828 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=432231 skip_writeback=2
+[Loader] call_count=14844493 evict_count=536573
+[Loader-LFU-Debug] req=10347041 returned=10347041 score_calls=103470410 ok=103470408 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=453691 skip_writeback=2
+[Loader] call_count=15495806 evict_count=558255
+[Loader-LFU-Debug] req=10798157 returned=10798157 score_calls=107981570 ok=107981568 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=474312 skip_writeback=2
+[Loader] call_count=16148025 evict_count=580561
+[Loader-LFU-Debug] req=11256152 returned=11256139 score_calls=112561390 ok=112561388 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=494557 skip_writeback=2
+[Loader] call_count=16796906 evict_count=601921
+[Loader-LFU-Debug] req=11702248 returned=11702248 score_calls=117022480 ok=117022478 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=515296 skip_writeback=2
+[Loader] call_count=17432123 evict_count=622910
+[Loader-LFU-Debug] req=12142392 returned=12142392 score_calls=121423920 ok=121423918 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=537007 skip_writeback=2
+[Loader] call_count=18079113 evict_count=644761
+[Loader-LFU-Debug] req=12590264 returned=12590264 score_calls=125902640 ok=125902638 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=557095 skip_writeback=2
+[Loader] call_count=18712523 evict_count=666846
+[Loader-LFU-Debug] req=13032335 returned=13032335 score_calls=130323350 ok=130323348 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=578120 skip_writeback=2
+[Loader] call_count=19365638 evict_count=689440
+[Loader-LFU-Debug] req=13485995 returned=13485995 score_calls=134859950 ok=134859948 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=600044 skip_writeback=2
+[Loader] call_count=20055509 evict_count=714002
+[Loader-LFU-Debug] req=13974766 returned=13974766 score_calls=139747660 ok=139747658 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=622518 skip_writeback=2
+[Loader] call_count=20711004 evict_count=737266
+[Loader-LFU-Debug] req=14436584 returned=14436584 score_calls=144365840 ok=144365838 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=646130 skip_writeback=2
+[Loader] call_count=21381951 evict_count=761083
+[Loader-LFU-Debug] req=14908075 returned=14908075 score_calls=149080750 ok=149080748 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=670545 skip_writeback=2
+[Loader] call_count=21957696 evict_count=779158
+[Loader-LFU-Debug] req=15262809 returned=15262809 score_calls=152628090 ok=152628088 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=684008 skip_writeback=2
+[Loader] call_count=22173014 evict_count=783982
+[Loader-LFU-Debug] req=15357738 returned=15357738 score_calls=153577380 ok=153577378 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=684387 skip_writeback=2
+[Loader] call_count=22173014 evict_count=783982
+[Loader-LFU-Debug] req=15357738 returned=15357738 score_calls=153577380 ok=153577378 skip_not_uptodate=0 skip_not_lru=0 skip_dirty=0 dirty_penalized=684387 skip_writeback=2

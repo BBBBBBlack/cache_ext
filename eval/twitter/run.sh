@@ -34,7 +34,7 @@ mkdir -p "$RESULTS_PATH"
 cd "$YCSB_PATH/build"
 git checkout leveldb-latency
 make clean
-make -j run_leveldb
+make -j run_leveldb init_leveldb
 
 cd -
 

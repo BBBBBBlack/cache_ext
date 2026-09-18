@@ -116,6 +116,25 @@ class FioBenchmark(BenchmarkFramework):
         parser.add_argument("--random-distribution", type=str, default="")
         parser.add_argument("--write_iolog", type=str, default="")
         parser.add_argument("--log_offset", type=int, default=0)
+        parser.add_argument("--bw-log", type=str, default="",
+            help="Prefix for fio time-series logs (bw/iops/lat), e.g. /tmp/run1")
+        parser.add_argument("--log-avg-msec", type=int, default=1000,
+            help="Averaging window for time-series logs in ms")
+        parser.add_argument(
+            "--keep-cgroup",
+            action="store_true",
+            default=False,
+            help=(
+                "Leave the benchmark cgroup in place after fio exits so an "
+                "external runner can collect final memory.stat/memory.events."
+            ),
+        )
+        parser.add_argument(
+            "--group-reporting",
+            action="store_true",
+            default=False,
+            help="Enable fio group_reporting aggregation. Disabled by default so job-level JSON stays visible.",
+        )
 
     def generate_configs(self, configs: List[Dict]) -> List[Dict]:
         cgroup_sizes = parse_size_list(self.args.cgroup_sizes)
@@ -160,7 +179,9 @@ class FioBenchmark(BenchmarkFramework):
             else:
                 log.info("Using external Dispatcher, skipping cgroup recreation.")
                 cgroup_dir = f"/sys/fs/cgroup/{config['cgroup_name']}"
-                os.system(f"echo {config['cgroup_size']} > {cgroup_dir}/memory.max")
+                if not os.path.isdir(cgroup_dir):
+                    run(["sudo", "mkdir", "-p", cgroup_dir])
+                run(["sudo", "sh", "-c", f"echo {config['cgroup_size']} > {cgroup_dir}/memory.max"])
         else:
             recreate_baseline_cgroup(limit_in_bytes=config["cgroup_size"])
 
@@ -169,10 +190,25 @@ class FioBenchmark(BenchmarkFramework):
 
     def benchmark_cmd(self, config):
         target_dir = self.args.target_dir    
+        fio_cmd = [
+            "fio",
+            "--direct=0",
+            "--output-format=json",
+            "--norandommap=1",
+        ]
+        if self.args.group_reporting:
+            fio_cmd.append("--group_reporting")
         cmd = [
             "sudo", "cgexec", "-g", f"memory:{config['cgroup_name']}",
-            "fio", "--direct=0", "--group_reporting", "--output-format=json", "--norandommap=1"
+            *fio_cmd,
         ]
+        if self.args.bw_log:
+            cmd.extend([
+                f"--write_bw_log={self.args.bw_log}",
+                f"--write_iops_log={self.args.bw_log}",
+                f"--write_lat_log={self.args.bw_log}",
+                f"--log_avg_msec={self.args.log_avg_msec}",
+            ])
         
         # ================= 新增：动态异构命令组装 =================
         if config.get("job_config"):
@@ -193,6 +229,8 @@ class FioBenchmark(BenchmarkFramework):
                         cmd.append(f"--runtime={job['runtime']}")
                     else:
                         cmd.append(f"--runtime={config['runtime_seconds']}")
+                    if "ramp_time" in job:
+                        cmd.append(f"--ramp_time={job['ramp_time']}")
                     if "startdelay" in job:
                         cmd.append(f"--startdelay={job['startdelay']}")
 
@@ -248,9 +286,21 @@ class FioBenchmark(BenchmarkFramework):
 
     def after_benchmark(self, config):
         self.cpu_usage = sum(psutil.cpu_percent(percpu=True)[:config["cpus"]])
-        if (config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP and self.cache_ext_policy.loader_path):
+        if self.args.keep_cgroup:
+            if (
+                config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP
+                and self.cache_ext_policy.loader_path
+            ):
+                self.cache_ext_policy.stop()
+            log.info(
+                "Keeping cgroup %s for the caller to snapshot and clean up",
+                config["cgroup_name"],
+            )
+        elif (config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP and self.cache_ext_policy.loader_path):
             self.cache_ext_policy.stop()
-        delete_cgroup(config["cgroup_name"])
+            delete_cgroup(config["cgroup_name"])
+        elif config["cgroup_name"] != DEFAULT_CACHE_EXT_CGROUP:
+            delete_cgroup(config["cgroup_name"])
         enable_smt()
 
     def parse_results(self, stdout: str) -> BenchResults:
