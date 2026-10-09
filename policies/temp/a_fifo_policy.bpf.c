@@ -193,10 +193,7 @@ int fifo_push(u64 handle)
 
 static int bpf_fifo_evict_cb(int idx, struct cache_ext_list_node* a)
 {
-  if (!folio_test_uptodate(a->folio))
-    return CACHE_EXT_CONTINUE_ITER;
-
-  if (!folio_test_lru(a->folio))
+  if (!folio_test_uptodate(a->folio) || !folio_test_lru(a->folio))
     return CACHE_EXT_CONTINUE_ITER;
 
   if (folio_test_writeback(a->folio))
@@ -209,7 +206,6 @@ SEC("freplace/slot_evict_folios1")
 int fifo_evict_folios(u64 eviction_ctx_handle, u64 memcg_handle)
 {
   // bpf_printk("FIFO evicted.\n");
-  int ret;
 
   struct cache_ext_eviction_ctx* eviction_ctx =
       bpf_cache_ext_handle_to_ctx(eviction_ctx_handle, secret);
@@ -222,7 +218,6 @@ int fifo_evict_folios(u64 eviction_ctx_handle, u64 memcg_handle)
 
   if (ensure_initialized_by_memcg(memcg) < 0)
     return -1;
-
   struct cache_ext_iterate_opts opts = {
       .continue_list = CACHE_EXT_ITERATE_SELF,
       .continue_mode = CACHE_EXT_ITERATE_SKIP,
@@ -232,20 +227,19 @@ int fifo_evict_folios(u64 eviction_ctx_handle, u64 memcg_handle)
       .deferred_mode = CACHE_EXT_ITERATE_TAIL,
   };
 
-  ret = bpf_cache_ext_list_iterate_extended(
-      memcg, main_list, bpf_fifo_evict_cb, &opts, eviction_ctx);
-
-  if (ret < 0)
+  if (bpf_cache_ext_list_iterate_extended(
+          memcg, main_list, bpf_fifo_evict_cb, &opts, eviction_ctx) < 0)
     return -1;
   return 0;
 }
 
 u64 call_count = 0;
-u64 evict_count = 0;
 
-SEC("freplace/slot_folios_evicted1")
-int fifo_folios_evicted(u64 ctx_handle)
+SEC("freplace/slot_folio_evicted1")
+int fifo_folio_evicted(u64 handle)
 {
+  // if (!is_folio_relevant(folio))
+  //   return 0;
   return 0;
 }
 

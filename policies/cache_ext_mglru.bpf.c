@@ -32,20 +32,7 @@ char _license[] SEC("license") = "GPL";
 // Maps //
 //////////
 
-#define MAX_NR_FOLIOS 4000000
 #define MAX_NR_GHOST_ENTRIES 400000
-
-struct folio_metadata {
-	s64 accesses;
-	s64 gen;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, __u64);
-	__type(value, struct folio_metadata);
-	__uint(max_entries, MAX_NR_FOLIOS);
-} folio_metadata_map SEC(".maps");
 
 //////////////////
 // Ghost Enties //
@@ -372,28 +359,22 @@ static inline int get_tier_idx(struct mglru_global_metadata *lrugen)
 
 static inline void folio_inc_refs(struct folio *folio)
 {
-	struct folio_metadata *metadata;
-	__u64 key = (__u64)folio;
-
-	metadata = bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (!metadata) {
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (!node) {
 		bpf_printk(
-			"cache_ext: Tried to inc refs but folio not found in map.\n");
+			"cache_ext: Tried to inc refs but folio not found.\n");
 		return;
 	}
-	__sync_fetch_and_add(&metadata->accesses, 1);
+	__sync_fetch_and_add(&node->metadata[0], 1);
 }
 
 static inline int folio_lru_refs(struct folio *folio)
 {
-	struct folio_metadata *metadata;
-	__u64 key = (__u64)folio;
-
-	metadata = bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (!metadata)
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (!node)
 		return -1;
 
-	return atomic_long_read(&metadata->accesses);
+	return (s64)node->metadata[0];
 }
 
 static inline unsigned int lru_gen_from_seq(unsigned long seq)
@@ -490,19 +471,10 @@ static inline bool lru_gen_add_folio(struct folio *folio)
 		return false;
 	}
 
-	// Update policy metadata
-	struct folio_metadata metadata = { .accesses = 1, .gen = gen };
-	__u64 key = (__u64)folio;
-	int ret = bpf_map_update_elem(&folio_metadata_map, &key, &metadata,
-				      BPF_ANY);
-	if (ret != 0) {
-		bpf_printk("cache_ext: Failed to save folio metadata\n");
-		return false;
-	}
 	update_nr_pages_stat(lrugen, gen, folio_nr_pages(folio));
 
 	// Update refaulted stats
-	ret = folio_in_ghost(folio);
+	int ret = folio_in_ghost(folio);
 	if (ret >= 0) {
 		int tier = ret;
 		update_refaulted_stat(lrugen, tier, 1);
@@ -516,6 +488,15 @@ static inline bool lru_gen_add_folio(struct folio *folio)
 			gen);
 		return false;
 	}
+
+	// Update inline metadata on the node
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (!node) {
+		bpf_printk("cache_ext: Failed to get node for folio metadata\n");
+		return false;
+	}
+	node->metadata[0] = 1;   // accesses
+	node->metadata[1] = gen; // gen
 
 	return true;
 }
@@ -735,43 +716,29 @@ static int mglru_iter_fn(int idx, struct cache_ext_list_node *a)
 	}
 	eviction_meta->iter_reached = idx;
 
-	// Get folio metadata
-	__u64 key = (__u64)a->folio;
-	struct folio_metadata *meta =
-		bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (!meta) {
-		bpf_printk("cache_ext: iter_fn: Failed to get metadata\n");
-		// TODO: Maybe we should evict it instead?
-		return CACHE_EXT_EVICT_NODE;
-	}
-
 	int tier_threshold = eviction_meta->tier_threshold;
 	if (tier_threshold > MAX_NR_TIERS || tier_threshold < 0) {
 		bpf_printk("cache_ext: Invalid tier threshold %d\n", tier_threshold);
 	}
-	// int tier_threshold = 2;
-	int tier = lru_tier_from_refs(atomic_long_read(&meta->accesses));
+	int tier = lru_tier_from_refs((s64)a->metadata[0]);
 
 	/* protected */
 	if (tier > tier_threshold) {
 		update_protected_stat(lrugen, tier, folio_nr_pages(a->folio));
-		// promote to next gen
-		// TODO: Update nr_pages stats
 		int num_pages = folio_nr_pages(a->folio);
 		update_nr_pages_stat(lrugen, eviction_meta->curr_gen, -num_pages);
 		update_nr_pages_stat(lrugen, eviction_meta->next_gen, num_pages);
-		atomic_long_store(&meta->gen, eviction_meta->next_gen);
+		a->metadata[1] = eviction_meta->next_gen;
 		return CACHE_EXT_CONTINUE_ITER;
 	}
 
 	/* waiting for writeback */
 	if (folio_test_locked(a->folio) || folio_test_writeback(a->folio) ||
 	    folio_test_dirty(a->folio)) {
-		// promote to next gen
 		int num_pages = folio_nr_pages(a->folio);
 		update_nr_pages_stat(lrugen, eviction_meta->curr_gen, -num_pages);
 		update_nr_pages_stat(lrugen, eviction_meta->next_gen, num_pages);
-		atomic_long_store(&meta->gen, eviction_meta->next_gen);
+		a->metadata[1] = eviction_meta->next_gen;
 		return CACHE_EXT_CONTINUE_ITER;
 	}
 	return CACHE_EXT_EVICT_NODE;
@@ -825,6 +792,8 @@ void BPF_STRUCT_OPS(mglru_evict_folios, struct cache_ext_eviction_ctx *eviction_
 		.continue_mode = CACHE_EXT_ITERATE_TAIL,
 		.evict_list = CACHE_EXT_ITERATE_SELF,
 		.evict_mode = CACHE_EXT_ITERATE_TAIL,
+		.deferred_list = CACHE_EXT_ITERATE_SELF,
+		.deferred_mode = CACHE_EXT_ITERATE_TAIL,
 	};
 
 
@@ -847,6 +816,8 @@ void BPF_STRUCT_OPS(mglru_evict_folios, struct cache_ext_eviction_ctx *eviction_
 			.continue_mode = CACHE_EXT_ITERATE_TAIL,
 			.evict_list = CACHE_EXT_ITERATE_SELF,
 			.evict_mode = CACHE_EXT_ITERATE_TAIL,
+			.deferred_list = CACHE_EXT_ITERATE_SELF,
+			.deferred_mode = CACHE_EXT_ITERATE_TAIL,
 		};
 		int ret = bpf_cache_ext_list_iterate_extended(
 			memcg, oldest_gen_list, mglru_iter_fn, &opts, eviction_ctx);
@@ -885,31 +856,27 @@ void BPF_STRUCT_OPS(mglru_folio_accessed, struct folio *folio)
 	folio_inc_refs(folio);
 }
 
-void BPF_STRUCT_OPS(mglru_folio_evicted, struct folio *folio)
+void BPF_STRUCT_OPS(mglru_folios_evicted, struct cache_ext_evicted_ctx *ectx)
 {
-	if (!is_folio_relevant(folio)) {
-		return;
+	for (int i = 0; i < (int)ectx->nr_folios && i < 32; i++)
+	{
+		struct folio *folio = ectx->folios[i];
+		if (!folio)
+			continue;
+		if (!is_folio_relevant(folio))
+			continue;
+
+		DEFINE_LRUGEN_void;
+		struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+		if (!node)
+			continue;
+
+		int tier = lru_tier_from_refs((s64)node->metadata[0]);
+		insert_ghost_entry_for_folio(folio, tier);
+
+		update_evicted_stat(lrugen, tier, 1);
+		update_nr_pages_stat(lrugen, node->metadata[1], -folio_nr_pages(folio));
 	}
-	DEFINE_LRUGEN_void;
-	// Remove tracked metadata
-	struct folio_metadata *metadata;
-	__u64 key = (__u64)folio;
-
-	metadata = bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (!metadata) {
-		bpf_printk(
-			"cache_ext: Tried to delete folio metadata but not found in map.\n");
-		return;
-	}
-	// Add ghost entry for refault detection
-	int tier = lru_tier_from_refs(atomic_long_read(&metadata->accesses));
-	insert_ghost_entry_for_folio(folio, tier);
-
-	// Update generation page count
-	update_evicted_stat(lrugen, tier, 1);
-	update_nr_pages_stat(lrugen, metadata->gen, -folio_nr_pages(folio));
-
-	bpf_map_delete_elem(&folio_metadata_map, &key);
 }
 
 SEC(".struct_ops.link")
@@ -917,6 +884,6 @@ struct cache_ext_ops mglru_ops = {
 	.init = (void *)mglru_init,
 	.evict_folios = (void *)mglru_evict_folios,
 	.folio_accessed = (void *)mglru_folio_accessed,
-	.folio_evicted = (void *)mglru_folio_evicted,
+	.folios_evicted = (void *)mglru_folios_evicted,
 	.folio_added = (void *)mglru_folio_added,
 };

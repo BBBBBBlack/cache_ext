@@ -12,14 +12,45 @@
 #include "a_uapi.h"
 #include "logger.h"
 
-#include "a_arc_policy.skel.h"
 #include "a_fifo_policy.skel.h"
-#include "a_lfu_policy.skel.h"
-#include "a_lru_policy.skel.h"
 #include "a_s3fifo_policy.skel.h"
 
 #define REGISTRY_MAP_PATH "/sys/fs/bpf/dispatcher_registry"
 
+#ifndef BPF_CGROUP_ITER_SELF_ONLY
+// enum bpf_cgroup_iter_order
+// {
+//   BPF_CGROUP_ITER_ORDER_UNSPEC,
+//   BPF_CGROUP_ITER_SELF_ONLY,
+//   BPF_CGROUP_ITER_DESCENDANTS_PRE,
+//   BPF_CGROUP_ITER_DESCENDANTS_POST,
+//   BPF_CGROUP_ITER_ANCESTORS_UP,
+// };
+
+// 重新定义一个兼容当前内核的结构体
+struct bpf_iter_link_info_kern
+{
+  union
+  {
+    struct
+    {
+      __u32 map_fd;
+    } map;
+    struct
+    {
+      enum bpf_cgroup_iter_order order;
+      __u32 cgroup_fd;
+      __u64 cgroup_id;
+    } cgroup;
+    struct
+    {
+      __u32 tid;
+      __u32 pid;
+      __u32 pid_fd;
+    } task;
+  };
+};
+#endif
 
 /**
  * ******************************************传参处理*******************************************
@@ -31,7 +62,6 @@ enum policy_type
   POLICY_S3FIFO,
   POLICY_LRU,
   POLICY_LFU,
-  POLICY_ARC,
 };
 
 struct cmdline_args
@@ -60,24 +90,12 @@ static error_t parse_opt(int key, char* arg, struct argp_state* state)
       args->old_policy = POLICY_FIFO;
     else if (strcmp(arg, "s3fifo") == 0)
       args->old_policy = POLICY_S3FIFO;
-    else if (strcmp(arg, "lfu") == 0)
-      args->old_policy = POLICY_LFU;
-    else if (strcmp(arg, "lru") == 0)
-      args->old_policy = POLICY_LRU;
-    else if (strcmp(arg, "arc") == 0)
-      args->old_policy = POLICY_ARC;
     break;
   case 'n':
     if (strcmp(arg, "fifo") == 0)
       args->new_policy = POLICY_FIFO;
     else if (strcmp(arg, "s3fifo") == 0)
       args->new_policy = POLICY_S3FIFO;
-    else if (strcmp(arg, "lfu") == 0)
-      args->new_policy = POLICY_LFU;
-    else if (strcmp(arg, "lru") == 0)
-      args->new_policy = POLICY_LRU;
-    else if (strcmp(arg, "arc") == 0)
-      args->new_policy = POLICY_ARC;
     break;
   default:
     return ARGP_ERR_UNKNOWN;
@@ -88,36 +106,6 @@ static error_t parse_opt(int key, char* arg, struct argp_state* state)
 static struct argp argp = {options, parse_opt, 0, "Load FIFO policy and attach to a specific Cgroup Dispatcher."};
 
 /********策略选择*********/
-#define DEFINE_POLICY_WRAPPERS(lower)                                     \
-  static int wrap_##lower##_load(struct policy_driver* driver)            \
-  {                                                                       \
-    return a_##lower##_policy_bpf__load(driver->skel.lower);              \
-  }                                                                       \
-  static int wrap_##lower##_attach(struct policy_driver* driver)          \
-  {                                                                       \
-    return a_##lower##_policy_bpf__attach(driver->skel.lower);            \
-  }                                                                       \
-  static void wrap_##lower##_destroy(struct policy_driver* driver)        \
-  {                                                                       \
-    if (driver->skel.lower)                                               \
-    {                                                                     \
-      a_##lower##_policy_bpf__destroy(driver->skel.lower);                \
-      driver->skel.lower = NULL;                                          \
-    }                                                                     \
-  }                                                                       \
-  static u64 wrap_##lower##_get_call_count(struct policy_driver* driver)  \
-  {                                                                       \
-    return (driver->skel.lower && driver->skel.lower->bss)                \
-               ? driver->skel.lower->bss->call_count                      \
-               : 0;                                                       \
-  }                                                                       \
-  static u64 wrap_##lower##_get_evict_count(struct policy_driver* driver) \
-  {                                                                       \
-    return (driver->skel.lower && driver->skel.lower->bss)                \
-               ? driver->skel.lower->bss->evict_count                     \
-               : 0;                                                       \
-  }
-
 #define INIT_POLICY_CASE(UPPER, lower)                                               \
   case POLICY_##UPPER:                                                               \
     driver->type = POLICY_##UPPER;                                                   \
@@ -128,12 +116,11 @@ static struct argp argp = {options, parse_opt, 0, "Load FIFO policy and attach t
     driver->attach = wrap_##lower##_attach;                                          \
     driver->destroy = wrap_##lower##_destroy;                                        \
     driver->get_call_count = wrap_##lower##_get_call_count;                          \
-    driver->get_evict_count = wrap_##lower##_get_evict_count;                        \
     driver->progs.do_targeted_init = driver->skel.lower->progs.do_targeted_init;     \
     driver->progs.folio_added = driver->skel.lower->progs.lower##_folio_added;       \
     driver->progs.folio_accessed = driver->skel.lower->progs.lower##_folio_accessed; \
     driver->progs.evict_folios = driver->skel.lower->progs.lower##_evict_folios;     \
-    driver->progs.folios_evicted = driver->skel.lower->progs.lower##_folios_evicted; \
+    driver->progs.folio_evicted = driver->skel.lower->progs.lower##_folio_evicted;   \
     driver->progs.slot_pop = driver->skel.lower->progs.lower##_pop;                  \
     driver->progs.slot_push = driver->skel.lower->progs.lower##_push;                \
     break;
@@ -143,19 +130,17 @@ struct policy_driver
   enum policy_type type;
   union
   {
-    struct a_arc_policy_bpf* arc;
     struct a_fifo_policy_bpf* fifo;
     struct a_s3fifo_policy_bpf* s3fifo;
-    struct a_lfu_policy_bpf* lfu;
-    struct a_lru_policy_bpf* lru;
+    // struct a_lru_policy_bpf* lru;
   } skel;
 
   int (*load)(struct policy_driver* driver);
   int (*attach)(struct policy_driver* driver);
   void (*destroy)(struct policy_driver* driver);
 
+  // 获取统计数据的接口（测试用的）
   u64 (*get_call_count)(struct policy_driver* driver);
-  u64 (*get_evict_count)(struct policy_driver* driver);
 
   struct
   {
@@ -165,18 +150,58 @@ struct policy_driver
     struct bpf_program* folio_added;
     struct bpf_program* folio_accessed;
     struct bpf_program* evict_folios;
-    struct bpf_program* folios_evicted;
+    struct bpf_program* folio_evicted;
     struct bpf_program* migrate_push_out;
     struct bpf_program* slot_pop;
     struct bpf_program* slot_push;
   } progs;
 };
 
-DEFINE_POLICY_WRAPPERS(fifo)
-DEFINE_POLICY_WRAPPERS(s3fifo)
-DEFINE_POLICY_WRAPPERS(lfu)
-DEFINE_POLICY_WRAPPERS(lru)
-DEFINE_POLICY_WRAPPERS(arc)
+static int wrap_fifo_load(struct policy_driver* driver)
+{
+  return a_fifo_policy_bpf__load(driver->skel.fifo);
+}
+static int wrap_fifo_attach(struct policy_driver* driver)
+{
+  return a_fifo_policy_bpf__attach(driver->skel.fifo);
+}
+static void wrap_fifo_destroy(struct policy_driver* driver)
+{
+  if (driver->skel.fifo)
+  {
+    a_fifo_policy_bpf__destroy(driver->skel.fifo);
+    driver->skel.fifo = NULL;
+  }
+}
+static u64 wrap_fifo_get_call_count(struct policy_driver* driver)
+{
+  return (driver->skel.fifo && driver->skel.fifo->bss)
+             ? driver->skel.fifo->bss->call_count
+             : 0;
+}
+
+static int wrap_s3fifo_load(struct policy_driver* driver)
+{
+  return a_s3fifo_policy_bpf__load(driver->skel.s3fifo);
+}
+static int wrap_s3fifo_attach(struct policy_driver* driver)
+{
+  return a_s3fifo_policy_bpf__attach(driver->skel.s3fifo);
+}
+static void wrap_s3fifo_destroy(struct policy_driver* driver)
+{
+  if (driver->skel.s3fifo)
+  {
+    a_s3fifo_policy_bpf__destroy(driver->skel.s3fifo);
+    driver->skel.s3fifo = NULL;
+  }
+}
+static u64 wrap_s3fifo_get_call_count(struct policy_driver* driver)
+{
+  return (driver->skel.s3fifo && driver->skel.s3fifo->bss)
+             ? driver->skel.s3fifo->bss->call_count
+             : 0;
+}
 
 int select_skel(struct policy_driver* driver, enum policy_type type)
 {
@@ -184,9 +209,6 @@ int select_skel(struct policy_driver* driver, enum policy_type type)
   {
     INIT_POLICY_CASE(FIFO, fifo);
     INIT_POLICY_CASE(S3FIFO, s3fifo);
-    INIT_POLICY_CASE(LFU, lfu);
-    INIT_POLICY_CASE(LRU, lru);
-    INIT_POLICY_CASE(ARC, arc);
   default:
     fprintf(stderr, "Invalid or unknown policy selected.\n");
     return -1;
@@ -210,6 +232,8 @@ struct loader_server
   __u64 cgroup_id;
   char socket_path[PATH_MAX];
 };
+
+static int run_state_migration_round(int dispatcher_pull_prog_fd, enum ipc_cmd phase);
 
 #define MAX_EPOLL_EVENTS 10
 
@@ -253,8 +277,18 @@ static int wait_dispatcher(struct loader_server* server,
         if (n != sizeof(msg))
           continue;
 
-        if (msg.cmd == CMD_MIGRATION_COMPLETE)
+        if (msg.cmd == CMD_MIGRATION_PROGRESS)
         {
+          if (run_state_migration_round(dispatcher_pull_prog_fd, CMD_MIGRATION_PROGRESS) < 0)
+          {
+            ret = -1;
+            is_complete = 1;
+          }
+        }
+        else if (msg.cmd == CMD_MIGRATION_COMPLETE)
+        {
+          if (run_state_migration_round(dispatcher_pull_prog_fd, CMD_MIGRATION_COMPLETE) < 0)
+            ret = -1;
           printf("[Loader] Received MIGRATION_COMPLETE from dispatcher.\n");
           is_complete = 1;
         }
@@ -273,7 +307,7 @@ struct dispatcher_prog_ids
   __u32 folio_added_id;
   __u32 folio_accessed_id;
   __u32 evict_folios_id;
-  __u32 folios_evicted_id;
+  __u32 folio_evicted_id;
   __u32 trigger_pull_id;
 };
 struct dispatcher_prog_fds
@@ -314,7 +348,7 @@ int get_dispatcher_fd_from_registry(__u64 target_cgroup_id, const char* cgroup_p
   fds->fd_added = bpf_prog_get_fd_by_id(ids.folio_added_id);
   fds->fd_accessed = bpf_prog_get_fd_by_id(ids.folio_accessed_id);
   fds->fd_evict = bpf_prog_get_fd_by_id(ids.evict_folios_id);
-  fds->fd_evicted = bpf_prog_get_fd_by_id(ids.folios_evicted_id);
+  fds->fd_evicted = bpf_prog_get_fd_by_id(ids.folio_evicted_id);
   fds->fd_trigger_pull = bpf_prog_get_fd_by_id(ids.trigger_pull_id);
 
   printf("Service Discovery: folio_added (FD:%d), evict_folios (FD:%d), dispatcher trigger_pull (FD:%d)\n",
@@ -375,8 +409,8 @@ static int prepare_slot_hooks(
   if (attach_prog_to_slot(policy->progs.evict_folios, fds->fd_evict,
                           "evict_folios", slot_id) < 0)
     return -1;
-  if (attach_prog_to_slot(policy->progs.folios_evicted, fds->fd_evicted,
-                          "folios_evicted", slot_id) < 0)
+  if (attach_prog_to_slot(policy->progs.folio_evicted, fds->fd_evicted,
+                          "folio_evicted", slot_id) < 0)
     return -1;
 
   if (slot_id == 1)
@@ -424,72 +458,37 @@ static int trigger_syscall_prog_fd(int prog_fd)
   return opts.retval;
 }
 
-static void wait_for_natural_migration(struct policy_driver* new_policy,
-                                       int timeout_ms)
-{
-  int elapsed_ms = 0;
-  int poll_ms = 100;
-  u64 prev_count = 0;
-  int growing_rounds = 0;
-
-  printf("[Loader] Waiting for dual-rail natural migration...\n");
-  while (elapsed_ms < timeout_ms)
-  {
-    usleep(poll_ms * 1000);
-    elapsed_ms += poll_ms;
-
-    if (!new_policy->get_call_count)
-      continue;
-
-    u64 cur = new_policy->get_call_count(new_policy);
-    if (cur > prev_count)
-    {
-      growing_rounds++;
-      prev_count = cur;
-    }
-    if (growing_rounds >= 3)
-    {
-      printf("[Loader] New policy receiving traffic (call_count=%lu), "
-             "natural migration active.\n",
-             cur);
-      return;
-    }
-  }
-  printf("[Loader] Warmup timeout (%dms), proceeding to drain.\n", timeout_ms);
-}
-
-static int drain_old_policy(int dispatcher_pull_prog_fd)
+static int run_state_migration_round(int dispatcher_pull_prog_fd, enum ipc_cmd phase)
 {
   int total_pulled = 0;
-  int idle_rounds = 0;
-  int backoff_us = 1000;
-
-  printf("[Loader] Draining remaining pages from old policy...\n");
-  while (1)
+  // 全部迁移
+  if (phase == CMD_MIGRATION_COMPLETE)
+    while (1)
+    {
+      int count = trigger_syscall_prog_fd(dispatcher_pull_prog_fd);
+      if (count < 0)
+      {
+        fprintf(stderr, "[Final] Error occurred during data pull.\n");
+        return -1;
+      }
+      if (count == 0)
+        break;
+      total_pulled += count;
+      printf("[Final] Pulled %d folios (Total: %d)...\n",
+             count, total_pulled);
+    }
+  // 以p进度迁移
+  else if (phase == CMD_MIGRATION_PROGRESS)
   {
     int count = trigger_syscall_prog_fd(dispatcher_pull_prog_fd);
     if (count < 0)
     {
-      fprintf(stderr, "[Loader] Migration failed during pull.\n");
+      fprintf(stderr, "[Progress] Error occurred during data pull.\n");
       return -1;
     }
-    if (count == 0)
-    {
-      if (++idle_rounds >= 3)
-      {
-        printf("[Loader] Old policy drained completely!\n");
-        break;
-      }
-      usleep(backoff_us);
-      backoff_us = (backoff_us < 50000) ? backoff_us * 2 : 50000;
-      continue;
-    }
     total_pulled += count;
-    idle_rounds = 0;
-    backoff_us = 1000;
-    printf("[Loader] Pulled %d folios (Total: %d)...\n", count, total_pulled);
+    printf("[Progress] Migration round completed. total=%d\n", total_pulled);
   }
-  printf("[Loader] Active migration finished. Total moved: %d\n", total_pulled);
   return 0;
 }
 
@@ -533,8 +532,6 @@ int main(int argc, char** argv)
   if (get_dispatcher_fd_from_registry(
           target_cgroup_id, args.cgroup_path, &fds) < 0)
     goto cleanup;
-  if (fds.fd_trigger_pull < 0)
-    fprintf(stderr, "Invalid trigger_pull prog fd\n");
 
   // *********************** Old Policy ***********************
   struct policy_driver old_policy;
@@ -559,32 +556,15 @@ int main(int argc, char** argv)
   {
     printf("[Loader] Single policy mode active. Dispatcher and FIFO are running.\n");
     printf("[Loader] Waiting infinitely. Press Ctrl+C to stop...\n");
+    // 保持进程存活，维持 BPF 挂载状态
     while (1)
-    {
       sleep(10);
-      u64 cc = old_policy.get_call_count ? old_policy.get_call_count(&old_policy) : 0;
-      u64 ec = old_policy.get_evict_count ? old_policy.get_evict_count(&old_policy) : 0;
-      printf("[Loader] call_count=%lu evict_count=%lu\n", cc, ec);
-      fflush(stdout);
-    }
     goto cleanup;
   }
   // ====================================================
 
   printf("Old Policy running. Inject traffic now, then press [ENTER] to migrate...\n");
-  {
-    u64 cc = old_policy.get_call_count ? old_policy.get_call_count(&old_policy) : 0;
-    u64 ec = old_policy.get_evict_count ? old_policy.get_evict_count(&old_policy) : 0;
-    printf("[Loader] Before migration: call_count=%lu evict_count=%lu\n", cc, ec);
-    fflush(stdout);
-  }
   getchar();
-  {
-    u64 cc = old_policy.get_call_count ? old_policy.get_call_count(&old_policy) : 0;
-    u64 ec = old_policy.get_evict_count ? old_policy.get_evict_count(&old_policy) : 0;
-    printf("[Loader] At migration trigger: call_count=%lu evict_count=%lu\n", cc, ec);
-    fflush(stdout);
-  }
 
   // *********************** New Policy ***********************
   struct policy_driver new_policy;
@@ -606,29 +586,16 @@ int main(int argc, char** argv)
 
   // 通知 Dispatcher 新策略加载完毕，开始迁移
   struct ipc_msg begin_msg = {.cmd = CMD_MIGRATION_BEGIN, .p = 0};
-  if (send_ipc_message(DISPATCHER_CONTROL_SOCKET_PATH, target_cgroup_id, &begin_msg) < 0)
+  send_ipc_message(DISPATCHER_CONTROL_SOCKET_PATH, target_cgroup_id, &begin_msg);
+
+  if (wait_dispatcher(&loader_server, fds.fd_trigger_pull) < 0)
   {
-    fprintf(stderr, "Failed to notify dispatcher of migration begin.\n");
+    fprintf(stderr, "Failed while waiting for dispatcher progress.\n");
     goto cleanup;
   }
 
-  wait_for_natural_migration(&new_policy, 5000);
-
-  if (drain_old_policy(fds.fd_trigger_pull) < 0)
-  {
-    fprintf(stderr, "Failed while draining old policy.\n");
-    goto cleanup;
-  }
-
-  // *********************** Finalize & Offload Old Policy ***********************
-  printf("\n[Loader] Migration fully completed.\n");
-
-  struct ipc_msg finalize_msg = {.cmd = CMD_MIGRATION_FINALIZE, .p = 0};
-  if (send_ipc_message(DISPATCHER_CONTROL_SOCKET_PATH, target_cgroup_id, &finalize_msg) == 0)
-    printf("[Loader] Dispatcher finalized: single-slot fast path restored.\n");
-  else
-    fprintf(stderr, "[Loader] Warning: failed to send finalize to dispatcher.\n");
-
+  // *********************** Offload Old Policy ***********************
+  printf("\n[Loader] Migration fully completed. Unloading old policy to free memory...\n");
   if (old_policy.destroy)
   {
     old_policy.destroy(&old_policy);

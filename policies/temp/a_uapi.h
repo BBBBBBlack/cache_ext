@@ -6,7 +6,6 @@
 #ifndef __BPF__
 #include <linux/types.h>
 #include <stdint.h>
-typedef int64_t s64;
 typedef uint32_t u32;
 typedef uint64_t u64;
 #endif
@@ -47,7 +46,30 @@ struct migration_status_event
 
 enum
 {
-  PHASE_END = 2
+  PHASE_OFF = 0,
+  PHASE_SLOW_START = 1,
+  PHASE_CA = 2, // Congestion Avoidance
+  PHASE_FAST_RECOVERY = 3,
+  PHASE_TIMEOUT = 4,
+  PHASE_COMPLETE = 5
+};
+
+struct transition_state
+{
+  union
+  {
+    struct
+    {
+      u32 phase;
+      u32 p; // 当前采用新策略的概率 (0-10000)
+    };
+    u64 routing_core; // 将 phase 和 p 联合为一个 64 位整数
+  };
+  u32 ssthresh; // 慢启动阈值 (0-10000)
+
+  // 持续性判断：多周期高/低 GHR 计数器
+  u32 high_ghr_streak; // 连续高 GHR 的周期数
+  u32 low_ghr_streak;  // 连续低 GHR 的周期数
 };
 
 #endif /* __A_UAPI_H__ */

@@ -68,12 +68,16 @@ def parse_size_list(size_list_str: str) -> List[int]:
 class FioBenchmark(BenchmarkFramework):
     def __init__(self, benchresults_cls=BenchResults, cli_args=None):
         super().__init__("fio_benchmark", benchresults_cls, cli_args)
+        for cgroup_name in (self.args.cache_ext_cgroup, self.args.baseline_cgroup):
+            validate_cgroup_name(cgroup_name)
+        self.cache_ext_cgroup = self.args.cache_ext_cgroup
+        self.baseline_cgroup = self.args.baseline_cgroup
         target_dir = self.args.target_dir
         if not os.path.exists(target_dir):
             os.mkdir(target_dir)
             
         self.cache_ext_policy = CacheExtPolicy(
-            DEFAULT_CACHE_EXT_CGROUP, self.args.policy_loader, target_dir
+            self.cache_ext_cgroup, self.args.policy_loader, target_dir
         )
         if self.args.policy_loader:
             CLEANUP_TASKS.append(lambda: self.cache_ext_policy.stop())
@@ -103,6 +107,18 @@ class FioBenchmark(BenchmarkFramework):
         )
         parser.add_argument("--target-dir", type=str, required=True)
         parser.add_argument("--policy-loader", type=str, default="")
+        parser.add_argument(
+            "--cache-ext-cgroup",
+            type=str,
+            default=DEFAULT_CACHE_EXT_CGROUP,
+            help="cgroup used for cache_ext policy runs",
+        )
+        parser.add_argument(
+            "--baseline-cgroup",
+            type=str,
+            default=DEFAULT_BASELINE_CGROUP,
+            help="cgroup used for baseline runs",
+        )
         parser.add_argument("--cgroup-sizes", type=str, default="5G,10G,30G")
         parser.add_argument("--workload", type=str, default="randread")
         parser.add_argument("--rwmixread", type=int, default=None)
@@ -135,6 +151,16 @@ class FioBenchmark(BenchmarkFramework):
             default=False,
             help="Enable fio group_reporting aggregation. Disabled by default so job-level JSON stays visible.",
         )
+        parser.add_argument(
+            "--cache-cleanup",
+            choices=["cgroup", "global", "none"],
+            default="cgroup",
+            help=(
+                "Page-cache cleanup scope before each benchmark configuration. "
+                "cgroup uses cgroup v2 memory.reclaim; global uses the "
+                "system-wide drop_caches knob; none skips cleanup."
+            ),
+        )
 
     def generate_configs(self, configs: List[Dict]) -> List[Dict]:
         cgroup_sizes = parse_size_list(self.args.cgroup_sizes)
@@ -154,28 +180,24 @@ class FioBenchmark(BenchmarkFramework):
         configs = add_config_option("log_offset", [self.args.log_offset], configs)
 
         if self.args.default_only:
-            configs = add_config_option("cgroup_name", [DEFAULT_BASELINE_CGROUP], configs)
+            configs = add_config_option("cgroup_name", [self.baseline_cgroup], configs)
         else:
-            configs = add_config_option("cgroup_name", [DEFAULT_CACHE_EXT_CGROUP], configs)
+            configs = add_config_option("cgroup_name", [self.cache_ext_cgroup], configs)
 
         for config in configs:
             config["rwmixread"] = self.args.rwmixread 
-            if config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP:
+            if config["cgroup_name"] == self.cache_ext_cgroup:
                 policy_loader_name = os.path.basename(self.cache_ext_policy.loader_path)
                 config["policy_loader"] = policy_loader_name
         return configs
 
     def benchmark_prepare(self, config):
-        log.info("Dropping page cache")
-        drop_page_cache()
-        if config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP:
+        if config["cgroup_name"] == self.cache_ext_cgroup:
             if self.cache_ext_policy.loader_path:
-                recreate_cache_ext_cgroup(limit_in_bytes=config["cgroup_size"])
-                policy_loader_name = os.path.basename(self.cache_ext_policy.loader_path)
-                if policy_loader_name == "cache_ext_s3fifo.out":
-                    self.cache_ext_policy.start(cgroup_size=config["cgroup_size"])
-                elif policy_loader_name:
-                    self.cache_ext_policy.start()
+                recreate_cache_ext_cgroup(
+                    cgroup=self.cache_ext_cgroup,
+                    limit_in_bytes=config["cgroup_size"],
+                )
             else:
                 log.info("Using external Dispatcher, skipping cgroup recreation.")
                 cgroup_dir = f"/sys/fs/cgroup/{config['cgroup_name']}"
@@ -183,7 +205,30 @@ class FioBenchmark(BenchmarkFramework):
                     run(["sudo", "mkdir", "-p", cgroup_dir])
                 run(["sudo", "sh", "-c", f"echo {config['cgroup_size']} > {cgroup_dir}/memory.max"])
         else:
-            recreate_baseline_cgroup(limit_in_bytes=config["cgroup_size"])
+            recreate_baseline_cgroup(
+                cgroup=self.baseline_cgroup,
+                limit_in_bytes=config["cgroup_size"],
+            )
+
+        # The cgroup must exist before a scoped reclaim can be requested.  In
+        # particular, this ordering also lets the external dispatcher runner
+        # prepare its cgroup before fio starts.
+        log.info(
+            "Cleaning page cache: scope=%s cgroup=%s",
+            self.args.cache_cleanup,
+            config["cgroup_name"],
+        )
+        drop_page_cache(
+            scope=self.args.cache_cleanup,
+            cgroup=config["cgroup_name"],
+        )
+
+        if config["cgroup_name"] == self.cache_ext_cgroup and self.cache_ext_policy.loader_path:
+            policy_loader_name = os.path.basename(self.cache_ext_policy.loader_path)
+            if policy_loader_name == "cache_ext_s3fifo.out":
+                self.cache_ext_policy.start(cgroup_size=config["cgroup_size"])
+            elif policy_loader_name:
+                self.cache_ext_policy.start()
 
     def before_benchmark(self, config):
         psutil.cpu_percent(percpu=True)
@@ -233,6 +278,11 @@ class FioBenchmark(BenchmarkFramework):
                         cmd.append(f"--ramp_time={job['ramp_time']}")
                     if "startdelay" in job:
                         cmd.append(f"--startdelay={job['startdelay']}")
+                    if "invalidate" in job:
+                        # Custom jobs may explicitly preserve page cache across
+                        # delayed warmup/steady phases.  Keep the option local
+                        # to the job so legacy configurations remain unchanged.
+                        cmd.append(f"--invalidate={job['invalidate']}")
 
                     if "filename" in job:
                         cmd.append(f"--filename={os.path.join(target_dir, job['filename'])}")
@@ -288,7 +338,7 @@ class FioBenchmark(BenchmarkFramework):
         self.cpu_usage = sum(psutil.cpu_percent(percpu=True)[:config["cpus"]])
         if self.args.keep_cgroup:
             if (
-                config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP
+                config["cgroup_name"] == self.cache_ext_cgroup
                 and self.cache_ext_policy.loader_path
             ):
                 self.cache_ext_policy.stop()
@@ -296,10 +346,10 @@ class FioBenchmark(BenchmarkFramework):
                 "Keeping cgroup %s for the caller to snapshot and clean up",
                 config["cgroup_name"],
             )
-        elif (config["cgroup_name"] == DEFAULT_CACHE_EXT_CGROUP and self.cache_ext_policy.loader_path):
+        elif (config["cgroup_name"] == self.cache_ext_cgroup and self.cache_ext_policy.loader_path):
             self.cache_ext_policy.stop()
             delete_cgroup(config["cgroup_name"])
-        elif config["cgroup_name"] != DEFAULT_CACHE_EXT_CGROUP:
+        elif config["cgroup_name"] != self.cache_ext_cgroup:
             delete_cgroup(config["cgroup_name"])
         enable_smt()
 

@@ -10,6 +10,9 @@
 #include <unistd.h>
 
 #include "dir_watcher.h"
+
+typedef uint64_t u64;
+
 #include "cache_ext_fifo.skel.h"
 
 char *USAGE = "Usage: ./cache_ext_fifo --watch_dir <dir> --cgroup_path <path>\n";
@@ -28,6 +31,41 @@ static volatile sig_atomic_t exiting;
 
 static void sig_handler(int signo) {
 	exiting = 1;
+}
+
+static void print_fifo_stats(struct cache_ext_fifo_bpf *skel)
+{
+	if (!skel || !skel->bss)
+		return;
+
+	unsigned long long requested = skel->bss->fifo_requested_folios;
+	unsigned long long returned = skel->bss->fifo_returned_folios;
+	unsigned long long skip_not_uptodate = skel->bss->fifo_cb_skip_not_uptodate;
+	unsigned long long skip_not_lru = skel->bss->fifo_cb_skip_not_lru;
+	unsigned long long skip_writeback = skel->bss->fifo_cb_skip_writeback;
+	double returned_pct = requested ? (100.0 * (double)returned / (double)requested) : 0.0;
+
+	printf("[FIFO stats] evict_calls=%llu requested=%llu returned=%llu returned/requested=%.2f%% "
+	       "cb_evict=%llu cb_continue=%llu skip_not_uptodate=%llu skip_not_lru=%llu skip_writeback=%llu "
+	       "iter_continue=%llu iter_evict=%llu iter_deferred=%llu "
+	       "ret_done=%llu ret_max_iter=%llu ret_array_filled=%llu ret_error=%llu\n",
+	       (unsigned long long)skel->bss->fifo_evict_calls,
+	       requested,
+	       returned,
+	       returned_pct,
+	       (unsigned long long)skel->bss->fifo_cb_evict,
+	       skip_not_uptodate + skip_not_lru + skip_writeback,
+	       skip_not_uptodate,
+	       skip_not_lru,
+	       skip_writeback,
+	       (unsigned long long)skel->bss->fifo_iter_continue,
+	       (unsigned long long)skel->bss->fifo_iter_evict,
+	       (unsigned long long)skel->bss->fifo_iter_deferred,
+	       (unsigned long long)skel->bss->fifo_iter_ret_done,
+	       (unsigned long long)skel->bss->fifo_iter_ret_max_iter,
+	       (unsigned long long)skel->bss->fifo_iter_ret_array_filled,
+	       (unsigned long long)skel->bss->fifo_iter_ret_error);
+	fflush(stdout);
 }
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state)
@@ -154,9 +192,12 @@ int main(int argc, char **argv) {
 		goto cleanup;
 	}
 
-	// Wait for keyboard input
-	printf("Press any key to exit...\n");
-	getchar();
+	printf("Press Ctrl-C to exit...\n");
+	while (!exiting) {
+		sleep(10);
+		print_fifo_stats(skel);
+	}
+	print_fifo_stats(skel);
 	ret = 0;
 
 cleanup:

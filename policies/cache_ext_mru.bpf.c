@@ -81,10 +81,12 @@ void BPF_STRUCT_OPS(mru_folio_accessed, struct folio *folio)
 	dbg_printk("cache_ext: Moved folio to mru_list tail\n");
 }
 
-void BPF_STRUCT_OPS(mru_folio_evicted, struct folio *folio)
+void BPF_STRUCT_OPS(mru_folios_evicted, struct cache_ext_evicted_ctx *ectx)
 {
-	dbg_printk("cache_ext: Hi from the mru_folio_evicted hook! :D\n");
-	bpf_cache_ext_list_del(folio);
+	for (int i = 0; i < (int)ectx->nr_folios && i < 32; i++) {
+		if (ectx->folios[i])
+			bpf_cache_ext_list_del(ectx->folios[i]);
+	}
 }
 
 static int iterate_mru(int idx, struct cache_ext_list_node *node)
@@ -117,6 +119,6 @@ struct cache_ext_ops mru_ops = {
 	.init = (void *)mru_init,
 	.evict_folios = (void *)mru_evict_folios,
 	.folio_accessed = (void *)mru_folio_accessed,
-	.folio_evicted = (void *)mru_folio_evicted,
+	.folios_evicted = (void *)mru_folios_evicted,
 	.folio_added = (void *)mru_folio_added,
 };

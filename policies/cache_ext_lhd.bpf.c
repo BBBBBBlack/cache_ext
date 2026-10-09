@@ -35,14 +35,6 @@ static u64 num_objects = 0;
 
 #define INT64_MAX  (9223372036854775807LL)
 
-// We omit size, assume all folios are same size for now
-struct folio_metadata {
-	u64 last_access_time;
-	u64 last_hit_age;
-	u64 last_last_hit_age;
-	u32 app;
-};
-
 struct lhd_class {
 	u64 total_hits;
 	u64 total_evictions;
@@ -53,13 +45,6 @@ struct lhd_class {
 };
 
 static struct lhd_class classes[NUM_CLASSES];
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u64);
-	__type(value, struct folio_metadata);
-	__uint(max_entries, 4000000);
-} folio_metadata_map SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -81,9 +66,31 @@ static inline bool is_folio_relevant(struct folio *folio) {
 	return inode_in_watchlist(folio->mapping->host->i_ino);
 }
 
-static inline struct folio_metadata *get_folio_metadata(struct folio *folio) {
-	u64 key = (u64)folio;
-	return bpf_map_lookup_elem(&folio_metadata_map, &key);
+static inline u64 node_last_access_time(struct cache_ext_list_node *node) {
+	return node->metadata[0];
+}
+
+static inline u64 node_last_hit_age(struct cache_ext_list_node *node) {
+	return node->metadata[1] & 0xFFFF;
+}
+
+static inline u64 node_last_last_hit_age(struct cache_ext_list_node *node) {
+	return (node->metadata[1] >> 16) & 0xFFFF;
+}
+
+static inline u32 node_app(struct cache_ext_list_node *node) {
+	return (u32)((node->metadata[1] >> 32) & 0xFFFF);
+}
+
+static inline void node_set_metadata(struct cache_ext_list_node *node,
+				     u64 last_access_time,
+				     u64 last_hit_age,
+				     u64 last_last_hit_age,
+				     u32 app) {
+	node->metadata[0] = last_access_time;
+	node->metadata[1] = (u64)(last_hit_age & 0xFFFF) |
+			    ((u64)(last_last_hit_age & 0xFFFF) << 16) |
+			    ((u64)(app & 0xFFFF) << 32);
 }
 
 static inline u32 hit_age_to_class(u64 hit_age) {
@@ -101,18 +108,18 @@ static inline u32 hit_age_to_class(u64 hit_age) {
 	return class;
 }
 
-static inline u32 get_class_id(struct folio_metadata *data) {
-	u32 hit_age_id = hit_age_to_class(data->last_hit_age + data->last_last_hit_age);
-	return data->app * HIT_AGE_CLASSES + hit_age_id;
+static inline u32 get_class_id(struct cache_ext_list_node *node) {
+	u32 hit_age_id = hit_age_to_class(node_last_hit_age(node) + node_last_last_hit_age(node));
+	return node_app(node) * HIT_AGE_CLASSES + hit_age_id;
 }
 
-static inline struct lhd_class *get_class(struct folio_metadata *data) {
-	u32 class_id = get_class_id(data);
+static inline struct lhd_class *get_class(struct cache_ext_list_node *node) {
+	u32 class_id = get_class_id(node);
 	return &classes[class_id & NUM_CLASSES_MASK];
 }
 
-static inline u64 get_age(struct folio_metadata *data) {
-	u64 age = (timestamp - data->last_access_time) >> age_coarsening_shift;
+static inline u64 get_age(struct cache_ext_list_node *node) {
+	u64 age = (timestamp - node_last_access_time(node)) >> age_coarsening_shift;
 
 	if (age >= MAX_AGE) {
 		overflows++;
@@ -122,12 +129,12 @@ static inline u64 get_age(struct folio_metadata *data) {
 	return age;
 }
 
-static inline u64 get_hit_density(struct folio_metadata *data) {
-	u64 age = get_age(data);
+static inline u64 get_hit_density(struct cache_ext_list_node *node) {
+	u64 age = get_age(node);
 	if (age == MAX_AGE - 1)
 		return 0;
 
-	struct lhd_class *cls = get_class(data);
+	struct lhd_class *cls = get_class(node);
 	if (!cls)
 		return -1;
 
@@ -311,13 +318,7 @@ static s64 bpf_lhd_score_fn(struct cache_ext_list_node *a) {
 	if (folio_test_dirty(a->folio) || folio_test_writeback(a->folio))
 		return INT64_MAX;
 
-	struct folio_metadata *data = get_folio_metadata(a->folio);
-	if (!data) {
-		bpf_printk("cache_ext: score_fn: Failed to get metadata\n");
-		return INT64_MAX;
-	}
-
-	return get_hit_density(data);
+	return get_hit_density(a);
 }
 
 void BPF_STRUCT_OPS(lhd_evict_folios, struct cache_ext_eviction_ctx *eviction_ctx,
@@ -371,23 +372,21 @@ void BPF_STRUCT_OPS(lhd_folio_accessed, struct folio *folio) {
 	if (!is_folio_relevant(folio))
 		return;
 
-	struct folio_metadata *data = get_folio_metadata(folio);
-	if (!data) {
-		bpf_printk("cache_ext: accessed: Failed to get metadata\n");
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (!node) {
+		bpf_printk("cache_ext: accessed: Failed to get node\n");
 		return;
 	}
 
-	u64 age = get_age(data);
-	struct lhd_class *cls = get_class(data);
+	u64 age = get_age(node);
+	struct lhd_class *cls = get_class(node);
 	if (!cls) {
 		bpf_printk("cache_ext: Failed to get class\n");
 		return;
 	}
 
-	data->last_last_hit_age = data->last_hit_age;
-	data->last_hit_age = age;
-	data->last_access_time = timestamp;
-	// data->app = DEFAULT_APP_ID % APP_CLASSES;
+	u64 prev_last_hit_age = node_last_hit_age(node);
+	node_set_metadata(node, timestamp, age, prev_last_hit_age, node_app(node));
 
 	u64 *hits = cls->hits + age;
 
@@ -405,42 +404,27 @@ void BPF_STRUCT_OPS(lhd_folio_accessed, struct folio *folio) {
 	}
 }
 
-void BPF_STRUCT_OPS(lhd_folio_evicted, struct folio *folio) {
-	u64 key = (u64)folio;
-	u64 age, hit_density, *evictions;
-	struct lhd_class *cls;
+void BPF_STRUCT_OPS(lhd_folios_evicted, struct cache_ext_evicted_ctx *ectx) {
+	for (int i = 0; i < (int)ectx->nr_folios && i < 32; i++) {
+		struct folio *folio = ectx->folios[i];
+		if (!folio) continue;
 
-	// if (bpf_cache_ext_list_del(folio)) {
-	// 	bpf_printk("cache_ext: Failed to delete folio from sampling_list\n");
-	// 	return;
-	// }
+		struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+		if (!node)
+			continue;
 
-	struct folio_metadata *data = bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (!data) {
-		//bpf_printk("cache_ext: evicted: Failed to get metadata\n");
-		return;
+		u64 age = get_age(node);
+		struct lhd_class *cls = get_class(node);
+		if (!cls)
+			continue;
+
+		u64 *evictions = cls->evictions + age;
+		__sync_fetch_and_add(evictions, 1 * HIT_SCALING_FACTOR);
+		__sync_fetch_and_sub(&num_objects, 1);
+
+		u64 hit_density = cls->hit_densities[age];
+		ewma_victim_hit_density = ewma_decay(ewma_victim_hit_density) + rem_ewma_decay(hit_density);
 	}
-
-	age = get_age(data);
-	cls = get_class(data);
-	if (!cls) {
-		bpf_printk("cache_ext: evicted: Failed to get class\n");
-		return;
-	}
-
-	evictions = cls->evictions + age;
-
-	__sync_fetch_and_add(evictions, 1 * HIT_SCALING_FACTOR);
-
-	__sync_fetch_and_sub(&num_objects, 1);
-
-	// Open-coded get_hit_density()
-	hit_density = cls->hit_densities[age];
-	ewma_victim_hit_density = ewma_decay(ewma_victim_hit_density) + rem_ewma_decay(hit_density);
-
-	// Remove folio metadata
-	if (bpf_map_delete_elem(&folio_metadata_map, &key))
-		bpf_printk("cache_ext: evicted: Failed to delete metadata\n");
 }
 
 void BPF_STRUCT_OPS(lhd_folio_added, struct folio *folio) {
@@ -452,31 +436,14 @@ void BPF_STRUCT_OPS(lhd_folio_added, struct folio *folio) {
 		return;
 	}
 
-	u64 key = (u64)folio;
-	struct folio_metadata new_meta = {
-		.last_access_time = timestamp,
-		.last_hit_age = 0,
-		.last_last_hit_age = MAX_AGE,
-		.app = DEFAULT_APP_ID % APP_CLASSES,
-	};
-
-	if (bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY)) {
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (!node) {
 		bpf_cache_ext_list_del(folio);
-		bpf_printk("cache_ext: added: Failed to create folio metadata\n");
+		bpf_printk("cache_ext: added: Failed to get node\n");
 		return;
 	}
 
-	// Track likely eviction candidates
-	// u64 hit_density = get_hit_density(&new_meta);
-	// if (hit_density == -1) {
-	// 	bpf_printk("cache_ext: added: Failed to get hit density\n");
-	// 	return;
-	// }
-
-	/*
-	if (hit_density < ewma_victim_hit_density)
-		recently_admitted[recently_admitted_head++ % RECENTLY_ADMITTED_SIZE] = (u64)folio;
-	*/
+	node_set_metadata(node, timestamp, 0, MAX_AGE, DEFAULT_APP_ID % APP_CLASSES);
 
 	__sync_fetch_and_add(&timestamp, 1);
 
@@ -497,6 +464,6 @@ struct cache_ext_ops lhd_ops = {
 	.init = (void *)lhd_init,
 	.evict_folios = (void *)lhd_evict_folios,
 	.folio_accessed = (void *)lhd_folio_accessed,
-	.folio_evicted = (void *)lhd_folio_evicted,
+	.folios_evicted = (void *)lhd_folios_evicted,
 	.folio_added = (void *)lhd_folio_added,
 };

@@ -40,7 +40,8 @@ usage() {
     echo "  policy:       fifo, lru, lfu, arc, lhd, s3fifo"
     echo ""
     echo "  cgroup_size:  内存限制 (默认 10G)，如 5G, 2G"
-    echo "  test_memory:  默认 false；true 时按 memory_interval 采样 baseline_test/cache_ext_test 的 memory.stat、memory.pressure 和 io.stat"
+    echo "  test_memory: 默认 false；有 LevelDB 对齐统计时默认只保留30秒快照，否则使用独立采样"
+    echo "  memory_poll: auto（默认）|true（额外独立采样）|false；独立采样还需 test_memory=true"
     echo "  memory_interval: 默认 5 秒；test_memory=true 时生效"
     echo "  test_perf:    默认 false；true 时每阶段在 warmup 后 attach run_leveldb 采 perf record，并采 page-cache add/readahead tracepoint"
     echo "  disable_readahead: 默认 false；true 时临时将 DB 所在块设备 readahead 设为 0，退出时恢复"
@@ -77,6 +78,7 @@ POLICY_NAME="$2"
 ITERATIONS=1
 CGROUP_SIZE="10G"
 TEST_MEMORY=false
+MEMORY_POLL="${MEMORY_POLL:-auto}"
 TEST_PERF=false
 DISABLE_READAHEAD=false
 MEMORY_SAMPLE_INTERVAL=5
@@ -87,6 +89,9 @@ CACHE_EXT_CGROUP_NAME="cache_ext_test"
 
 for arg in "${@:3}"; do
     case "$arg" in
+        test_leveldb_io=*|sst_sample_every=*|diagnostic_*=*)
+            echo "[Error] Retired diagnostics option: $arg; use test_memory=true" >&2; usage ;;
+        memory_poll=*) MEMORY_POLL="${arg#*=}" ;;
         test_memory|test_memory=true|--test-memory|true)
             TEST_MEMORY=true
             ;;
@@ -123,6 +128,24 @@ for arg in "${@:3}"; do
             ;;
     esac
 done
+
+source "$BASE_DIR/eval/leveldb_io_monitor.sh"
+resolve_memory_poll
+check_leveldb_io_binary
+
+run_benchmark_with_io() {
+    local stage="$1"
+    shift
+    if [ "$TEST_MEMORY" = true ]; then
+        local mode=no_perf
+        if [ "$TEST_PERF" = true ]; then mode=perf; fi
+        run_with_leveldb_io "$stage" \
+            "$RESULTS_PATH/ycsb_spc_${POLICY_NAME}_${BENCHMARK_TAG}_${CGROUP_SIZE_TAG}" \
+            "$mode" "$@"
+    else
+        "${BASE_CMD[@]}" "$@"
+    fi
+}
 
 # 如果数据库目录不存在或为空，自动初始化
 GENERATE_CONFIG="$YCSB_PATH/leveldb/config/generate_db.yaml"
@@ -165,7 +188,7 @@ echo "[Info] 所选 YCSB 负载: $BENCHMARK"
 echo "[Info] 所选 cache_ext 策略: $POLICY_NAME"
 echo "[Info] cgroup size: $CGROUP_SIZE"
 echo "[Info] memory/io 采样: $TEST_MEMORY"
-echo "[Info] memory/io 采样间隔: ${MEMORY_SAMPLE_INTERVAL}s"
+echo "[Info] Independent memory polling: $MEMORY_POLL_ENABLED (memory_poll=$MEMORY_POLL, interval=${MEMORY_SAMPLE_INTERVAL}s); Benchmark aligned snapshots: $TEST_MEMORY (30s)"
 echo "[Info] perf record 采样: $TEST_PERF"
 echo "[Info] page-cache tracepoint 采样: $TEST_PERF"
 echo "[Info] 禁用块设备 readahead: $DISABLE_READAHEAD"
@@ -230,7 +253,9 @@ start_memory_monitor() {
 
     stop_memory_monitor 2>/dev/null || true
 
-    if [ "$TEST_MEMORY" != "true" ]; then
+    if [ "$MEMORY_POLL_ENABLED" != "true" ]; then
+        echo "[Info] Independent memory polling disabled: stage=$stage; Benchmark snapshots=$TEST_MEMORY"
+        echo "# disabled: memory_poll=$MEMORY_POLL test_memory=$TEST_MEMORY snapshots=$TEST_MEMORY; use leveldb_io JSONL/io_windows CSV" > "$log_file"
         return 0
     fi
 
@@ -242,7 +267,8 @@ start_memory_monitor() {
         echo "# cgroup=$cgroup_name"
         echo "# cgroup_path=$cgroup_path"
         echo "# interval_seconds=$MEMORY_SAMPLE_INTERVAL"
-        echo "# fields: timestamp memory.current selected memory.stat memory.pressure io.stat"
+        echo "# fields: timestamp memory.current selected memory.stat memory.pressure io.stat cache_ext_reclaim.stat"
+        echo "# cache_ext_reclaim.stat: local cgroup cumulative counters; *_pages in PAGE_SIZE units; keep_* are exclusive reasons; use interval deltas"
         while true; do
             if [ -d "$cgroup_path" ]; then
                 echo "timestamp $(date '+%F %T')"
@@ -266,6 +292,11 @@ start_memory_monitor() {
                     sed 's/^/io.stat /' "$cgroup_path/io.stat" || true
                 else
                     echo "io.stat missing"
+                fi
+                if [ -f "$cgroup_path/memory.cache_ext_reclaim_stat" ]; then
+                    sed 's/^/cache_ext_reclaim.stat /' "$cgroup_path/memory.cache_ext_reclaim_stat" || true
+                else
+                    echo "cache_ext_reclaim.stat unavailable"
                 fi
                 echo
             else
@@ -322,7 +353,8 @@ start_pcache_monitor() {
         echo "# start_delay_seconds=$WARMUP_RUNTIME_SECONDS"
         echo "# duration_seconds=$RUNTIME_SECONDS"
         echo "# events=$PCACHE_EVENTS"
-        echo "# note: add_to_page_cache counts page-cache insertions/refills; prefetch counts readahead insertions; demand_miss_estimate ~= add_to_page_cache - prefetch"
+        echo "# note: raw event counts only; add includes write allocations, and readahead may include the demanded page. add-prefetch is NOT a demand-miss count."
+        echo "# scope: PID-attached perf window, not the phase-aligned LevelDB/cgroup window; do not normalize by whole-run ops."
 
         local pid=""
         local waited=0
@@ -444,214 +476,7 @@ stop_perf_monitor() {
     fi
 }
 
-append_validation_summary() {
-    if [ "$TEST_MEMORY" != "true" ] || [ "$TEST_PERF" != "true" ]; then
-        return 0
-    fi
-
-    local validation_log="$RESULTS_PATH/ycsb_spc_${POLICY_NAME}_${BENCHMARK_TAG}_${CGROUP_SIZE_TAG}_validation.log"
-
-    python3 - "$RESULT_FILE" "$RESULTS_PATH" "$POLICY_NAME" "$BENCHMARK_TAG" "$CGROUP_SIZE_TAG" "$RUNTIME_SECONDS" "$validation_log" <<'PY'
-import json
-import os
-import re
-import sys
-
-result_file, results_path, policy, benchmark_tag, cgroup_tag, runtime_s, validation_log = sys.argv[1:]
-runtime_s = float(runtime_s)
-
-stages = ["baseline", f"direct_{policy}", f"dispatcher_{policy}"]
-
-def parse_mem_log(path):
-    blocks = []
-    block = None
-
-    if not os.path.exists(path):
-        return None
-
-    with open(path, errors="ignore") as f:
-        for raw in f:
-            line = raw.strip()
-            if line.startswith("timestamp "):
-                if block is not None:
-                    blocks.append(block)
-                block = {"io": {}, "mem": {}}
-                continue
-            if block is None:
-                continue
-            if line.startswith("memory.current "):
-                parts = line.split()
-                if len(parts) == 2 and parts[1].isdigit():
-                    block["mem"]["memory.current"] = int(parts[1])
-                continue
-            if line.startswith("io.stat "):
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                dev = parts[1]
-                entry = {}
-                for p in parts[2:]:
-                    if "=" not in p:
-                        continue
-                    k, v = p.split("=", 1)
-                    if v.isdigit():
-                        entry[k] = int(v)
-                if entry:
-                    block["io"][dev] = entry
-                continue
-            parts = line.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                block["mem"][parts[0]] = int(parts[1])
-
-    if block is not None:
-        blocks.append(block)
-
-    blocks = [b for b in blocks if "memory.current" in b["mem"]]
-    if len(blocks) < 2:
-        return None
-
-    first, last = blocks[0], blocks[-1]
-    io_blocks = [b for b in blocks if b.get("io")]
-    first_io = io_blocks[0] if io_blocks else {}
-    last_io = io_blocks[-1] if io_blocks else {}
-
-    def io_delta_for_dev(dev, key):
-        first_val = first_io.get("io", {}).get(dev, {}).get(key, 0)
-        last_val = last_io.get("io", {}).get(dev, {}).get(key, 0)
-        return max(0, last_val - first_val)
-
-    common_devs = set(first_io.get("io", {})) & set(last_io.get("io", {}))
-    numeric_devs = [d for d in common_devs if re.fullmatch(r"[0-9]+:[0-9]+", d)]
-    non_dm_numeric_devs = [d for d in numeric_devs if not d.startswith("253:")]
-    candidate_devs = non_dm_numeric_devs or numeric_devs or sorted(common_devs)
-    io_device = None
-    if candidate_devs:
-        io_device = max(
-            candidate_devs,
-            key=lambda d: (
-                io_delta_for_dev(d, "rbytes") + io_delta_for_dev(d, "wbytes"),
-                io_delta_for_dev(d, "rios") + io_delta_for_dev(d, "wios"),
-                d,
-            ),
-        )
-
-    return {
-        "samples": len(blocks),
-        "io_samples": len(io_blocks),
-        "io_device": io_device or "unavailable",
-        "rbytes_delta": io_delta_for_dev(io_device, "rbytes") if io_device else 0,
-        "wbytes_delta": io_delta_for_dev(io_device, "wbytes") if io_device else 0,
-        "rios_delta": io_delta_for_dev(io_device, "rios") if io_device else 0,
-        "wios_delta": io_delta_for_dev(io_device, "wios") if io_device else 0,
-        "pgscan_delta": max(0, last["mem"].get("pgscan", 0) - first["mem"].get("pgscan", 0)),
-        "pgsteal_delta": max(0, last["mem"].get("pgsteal", 0) - first["mem"].get("pgsteal", 0)),
-        "memory_current_max": max(b["mem"].get("memory.current", 0) for b in blocks),
-        "file_dirty_max": max(b["mem"].get("file_dirty", 0) for b in blocks),
-        "file_writeback_max": max(b["mem"].get("file_writeback", 0) for b in blocks),
-    }
-
-def parse_pcache_log(path):
-    out = {
-        "add_to_page_cache": None,
-        "readahead_prefetch": None,
-        "demand_miss_estimate": None,
-        "perf_stat_ok": False,
-    }
-    if not os.path.exists(path):
-        return out
-
-    with open(path, errors="ignore") as f:
-        for raw in f:
-            line = raw.strip()
-            if "not supported" in line or "unknown tracepoint" in line or "event syntax error" in line:
-                out["error"] = line
-            parts = line.split(",")
-            if len(parts) < 3:
-                continue
-            count = parts[0].strip().replace(",", "")
-            event = parts[2].strip()
-            if not re.fullmatch(r"[0-9]+", count):
-                continue
-            val = int(count)
-            if event.endswith("mm_filemap_add_to_page_cache"):
-                out["add_to_page_cache"] = val
-                out["perf_stat_ok"] = True
-            elif event.endswith("mm_filemap_add_to_page_cache_prefetch"):
-                out["readahead_prefetch"] = val
-                out["perf_stat_ok"] = True
-
-    if out["add_to_page_cache"] is not None and out["readahead_prefetch"] is not None:
-        out["demand_miss_estimate"] = max(0, out["add_to_page_cache"] - out["readahead_prefetch"])
-    return out
-
-def fmt_bytes(v):
-    return f"{v / (1024 ** 3):.3f} GiB"
-
-try:
-    with open(result_file) as f:
-        results = json.load(f)
-except FileNotFoundError:
-    results = []
-
-rows = []
-for idx, stage in enumerate(stages):
-    mem_log = os.path.join(results_path, f"ycsb_spc_{policy}_{benchmark_tag}_{cgroup_tag}_mem_{stage}.log")
-    pcache_log = os.path.join(results_path, f"ycsb_spc_{policy}_{benchmark_tag}_{cgroup_tag}_pcache_{stage}.log")
-    mem = parse_mem_log(mem_log)
-    pcache = parse_pcache_log(pcache_log)
-    bench = results[idx]["results"] if idx < len(results) else {}
-    throughput = float(bench.get("throughput_avg", 0) or 0)
-    ops = throughput * runtime_s
-
-    rows.append({
-        "stage": stage,
-        "throughput_ops_s": throughput,
-        "estimated_ops": ops,
-        "mem": mem,
-        "pcache": pcache,
-    })
-
-with open(validation_log, "w") as f:
-    f.write("# cache_ext YCSB validation summary\n")
-    f.write(f"# result_file={result_file}\n")
-    f.write(f"# runtime_seconds={runtime_s:.0f}\n")
-    f.write("# caveat: io.stat may include stacked block devices; use same-method relative comparison unless device is filtered.\n\n")
-    for row in rows:
-        stage = row["stage"]
-        ops = row["estimated_ops"]
-        mem = row["mem"]
-        pc = row["pcache"]
-        f.write(f"[{stage}]\n")
-        f.write(f"throughput_ops_s={row['throughput_ops_s']:.2f}\n")
-        f.write(f"estimated_ops={ops:.0f}\n")
-        if mem and ops > 0:
-            f.write(f"io_device={mem['io_device']}\n")
-            f.write(f"read_io={fmt_bytes(mem['rbytes_delta'])}\n")
-            f.write(f"write_io={fmt_bytes(mem['wbytes_delta'])}\n")
-            f.write(f"read_bytes_per_op={mem['rbytes_delta'] / ops:.3f}\n")
-            f.write(f"write_bytes_per_op={mem['wbytes_delta'] / ops:.3f}\n")
-            f.write(f"read_ios_per_kop={mem['rios_delta'] / ops * 1000:.6f}\n")
-            f.write(f"write_ios_per_kop={mem['wios_delta'] / ops * 1000:.6f}\n")
-            f.write(f"pgscan_per_kop={mem['pgscan_delta'] / ops * 1000:.6f}\n")
-            f.write(f"pgsteal_per_kop={mem['pgsteal_delta'] / ops * 1000:.6f}\n")
-            f.write(f"memory_current_max={mem['memory_current_max']}\n")
-            f.write(f"file_dirty_max={mem['file_dirty_max']}\n")
-            f.write(f"file_writeback_max={mem['file_writeback_max']}\n")
-        else:
-            f.write("normalized_io=unavailable\n")
-        for key in ["add_to_page_cache", "readahead_prefetch", "demand_miss_estimate"]:
-            val = pc.get(key)
-            f.write(f"{key}={val if val is not None else 'unavailable'}\n")
-            if val is not None and ops > 0:
-                f.write(f"{key}_per_kop={val / ops * 1000:.6f}\n")
-        if pc.get("error"):
-            f.write(f"pcache_error={pc['error']}\n")
-        f.write("\n")
-
-print(f"[Done] validation summary written: {validation_log}")
-PY
-}
-
+# Phase-aligned io_windows CSV replaces the old estimated_ops validation summary.
 # Disable MGLRU
 if ! "$BASE_DIR/utils/disable-mglru.sh"; then
     echo "Failed to disable MGLRU. Please check the script."
@@ -684,7 +509,7 @@ echo "--------------------------------------------------------"
 start_memory_monitor "baseline" "$BASELINE_CGROUP_NAME"
 start_pcache_monitor "baseline" "$BASELINE_CGROUP_NAME"
 start_perf_monitor "baseline" "$BASELINE_CGROUP_NAME"
-"${BASE_CMD[@]}" --default-only --policy-loader ""
+run_benchmark_with_io baseline --default-only --policy-loader ""
 stop_perf_monitor
 stop_pcache_monitor
 stop_memory_monitor
@@ -698,7 +523,7 @@ echo "--------------------------------------------------------"
 start_memory_monitor "direct_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
 start_pcache_monitor "direct_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
 start_perf_monitor "direct_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
-"${BASE_CMD[@]}" --policy-loader "$POLICY_PATH/cache_ext_${POLICY_NAME}.out"
+run_benchmark_with_io "direct_${POLICY_NAME}" --policy-loader "$POLICY_PATH/cache_ext_${POLICY_NAME}.out"
 stop_perf_monitor
 stop_pcache_monitor
 stop_memory_monitor
@@ -729,12 +554,12 @@ echo "[Info] 正在运行 YCSB 压测..."
 start_memory_monitor "dispatcher_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
 start_pcache_monitor "dispatcher_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
 start_perf_monitor "dispatcher_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
-"${BASE_CMD[@]}" --policy-loader ""
+run_benchmark_with_io "dispatcher_${POLICY_NAME}" --policy-loader ""
 stop_perf_monitor
 stop_pcache_monitor
 stop_memory_monitor
 
-append_validation_summary
+# Per-stage io_windows CSV replaces the unaligned validation summary.
 
 echo "[Info] 压测结束，清理 Dispatcher 和 Loader 后台进程..."
 sudo kill -2 $LOADER_PID 2>/dev/null || true

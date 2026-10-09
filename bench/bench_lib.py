@@ -6,6 +6,7 @@ import resource
 import select
 import subprocess
 import sys
+import tempfile
 from abc import ABC, abstractmethod
 from contextlib import contextmanager, suppress
 from subprocess import CalledProcessError
@@ -34,6 +35,8 @@ class CacheExtPolicy:
         self.watch_dir = watch_dir
         self.has_started = False
         self._policy_thread = None
+        self._policy_stdout = None
+        self._policy_stderr = None
 
     def start(self, cgroup_size: int = 0):
         if self.has_started:
@@ -53,30 +56,59 @@ class CacheExtPolicy:
             cmd += ["--cgroup_size", str(cgroup_size)]
 
         log.info("Starting policy thread: %s", cmd)
-        self._policy_thread = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+        # Periodic policy diagnostics can exceed pipe capacity before stop().
+        # Spool outside the workload cgroup; keep the existing end-of-run log
+        # format without a reader thread or backpressure on the policy loader.
+        try:
+            self._policy_stdout = tempfile.TemporaryFile()
+            self._policy_stderr = tempfile.TemporaryFile()
+            self._policy_thread = subprocess.Popen(
+                cmd, stdout=self._policy_stdout, stderr=self._policy_stderr
+            )
+        except BaseException:
+            self._close_policy_output()
+            self.has_started = False
+            raise
         sleep(10)
 
         # For some reason, running a command with `sudo` messes up the terminal.
         # This is a workaround to fix it.
         # run(["stty", "sane"])
         if self._policy_thread.poll() is not None:
+            out, err = self._read_policy_output()
+            self._close_policy_output()
+            self.has_started = False
+            self._policy_thread = None
             raise Exception(
-                "Policy thread exited unexpectedly: %s"
-                % self._policy_thread.stderr.read().decode("utf-8")
+                "Policy thread exited unexpectedly: %s\n%s"
+                % (err.decode("utf-8", errors="replace"),
+                   out.decode("utf-8", errors="replace"))
             )
+
+    def _read_policy_output(self):
+        self._policy_stdout.seek(0)
+        self._policy_stderr.seek(0)
+        return self._policy_stdout.read(), self._policy_stderr.read()
+
+    def _close_policy_output(self):
+        for name in ("_policy_stdout", "_policy_stderr"):
+            stream = getattr(self, name)
+            if stream is not None:
+                stream.close()
+                setattr(self, name, None)
 
     def stop(self):
         if not self.has_started:
             raise Exception("Policy not started")
         cmd = ["sudo", "kill", "-2", str(self._policy_thread.pid)]
         run(cmd)
-        out, err = self._policy_thread.communicate()
+        self._policy_thread.communicate()
+        out, err = self._read_policy_output()
+        self._close_policy_output()
         with suppress(subprocess.CalledProcessError):
             run(["sudo", "rm", "/sys/fs/bpf/cache_ext/scan_pids"])
-        log.info("Policy thread stdout: %s", out.decode("utf-8"))
-        log.info("Policy thread stderr: %s", err.decode("utf-8"))
+        log.info("Policy thread stdout: %s", out.decode("utf-8", errors="replace"))
+        log.info("Policy thread stderr: %s", err.decode("utf-8", errors="replace"))
         self.has_started = False
         self._policy_thread = None
 
@@ -261,9 +293,110 @@ def recreate_baseline_cgroup(cgroup=DEFAULT_BASELINE_CGROUP, limit_in_bytes=2 * 
     run(["sudo", "sh", "-c", "echo %d > /sys/fs/cgroup/%s/memory.max" % (limit_in_bytes, cgroup)])
 
 
-def drop_page_cache():
-    run(["sudo", "sync"])
-    run(["sudo", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"])
+def validate_cgroup_name(cgroup: str):
+    """Reject cgroup names that could escape the cgroup v2 hierarchy."""
+    if not cgroup or cgroup in {".", ".."} or os.path.isabs(cgroup) or "/" in cgroup:
+        raise ValueError(f"invalid cgroup name: {cgroup!r}")
+
+
+def _read_cgroup_stat_bytes(cgroup_path: str, key: str) -> int:
+    """Read one byte-valued field from cgroup v2 memory.stat."""
+    stat_path = os.path.join(cgroup_path, "memory.stat")
+    try:
+        with open(stat_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) >= 2 and fields[0] == key:
+                    return max(0, int(fields[1]))
+    except FileNotFoundError:
+        pass
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"cannot read cgroup memory.stat ({stat_path}); run the benchmark "
+            "with permission to inspect the selected cgroup"
+        ) from exc
+    except ValueError:
+        # A malformed/non-numeric field is treated as unavailable rather than
+        # turning a best-effort cleanup into an unsafe global fallback.
+        pass
+    return 0
+
+
+def reclaim_cgroup_memory(cgroup: str, passes: int = 3):
+    """Best-effort reclaim of file-backed memory charged to one cgroup.
+
+    cgroup v2's memory.reclaim is intentionally used instead of the global
+    /proc/sys/vm/drop_caches knob.  The amount is bounded by the cgroup's
+    current ``memory.stat:file`` value, so the operation does not ask the
+    kernel to reclaim unrelated cgroups.  This is still best-effort: shared
+    page-cache pages may be charged to another cgroup and therefore cannot be
+    reclaimed by this call.
+    """
+    validate_cgroup_name(cgroup)
+    cgroup_path = f"/sys/fs/cgroup/{cgroup}"
+    reclaim_path = os.path.join(cgroup_path, "memory.reclaim")
+
+    if not os.path.exists(reclaim_path):
+        raise RuntimeError(
+            "cgroup-scoped cache cleanup requires cgroup v2 memory.reclaim: "
+            f"{reclaim_path}"
+        )
+
+    for attempt in range(max(1, passes)):
+        file_bytes = _read_cgroup_stat_bytes(cgroup_path, "file")
+        if file_bytes <= 0:
+            log.info("No file-backed memory to reclaim in cgroup %s", cgroup)
+            return
+
+        log.info(
+            "Reclaiming up to %s of file-backed memory from cgroup %s "
+            "(pass %d/%d)",
+            format_bytes_str(file_bytes),
+            cgroup,
+            attempt + 1,
+            max(1, passes),
+        )
+        # tee performs the privileged write without interpolating the path in
+        # a shell command.  Do not run sync/drop_caches here: both are global.
+        run(
+            ["sudo", "tee", reclaim_path],
+            input=f"{file_bytes}\n",
+            text=True,
+            stdout=subprocess.DEVNULL,
+        )
+        sleep(0.05)
+
+        remaining = _read_cgroup_stat_bytes(cgroup_path, "file")
+        if remaining == 0 or remaining >= file_bytes:
+            # No more file cache, or the kernel could not reclaim further.
+            return
+
+
+def drop_page_cache(scope: str = "global", cgroup: str = None):
+    """Clean page cache using an explicit scope.
+
+    ``cgroup`` is the safe default for the current fio runner.  ``global`` is
+    retained only as an explicit compatibility mode because it writes the
+    system-wide drop_caches knob and affects unrelated experiments. ``none``
+    skips cleanup entirely.
+    """
+    if scope == "none":
+        log.info("Skipping page-cache cleanup (scope=none)")
+        return
+    if scope == "cgroup":
+        if not cgroup:
+            raise ValueError("cgroup cache cleanup requires a cgroup name")
+        log.info("Cleaning page cache for cgroup %s (scope=cgroup)", cgroup)
+        reclaim_cgroup_memory(cgroup)
+        return
+    if scope == "global":
+        log.warning(
+            "Using global page-cache cleanup; concurrent experiments may be affected"
+        )
+        run(["sudo", "sync"])
+        run(["sudo", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"])
+        return
+    raise ValueError(f"unknown page-cache cleanup scope: {scope!r}")
 
 
 def set_sysctl(key: str, value: Union[int, str]):

@@ -33,17 +33,6 @@ char _license[] SEC("license") = "GPL";
 
 #define MAX_PAGES (1 << 20)
 
-struct folio_metadata {
-	u64 accesses;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, __u64);
-	__type(value, struct folio_metadata);
-	__uint(max_entries, 4000000);
-} folio_metadata_map SEC(".maps");
-
 __u64 sampling_list;
 
 #define MAX_STAT_NAME_LEN 256
@@ -139,10 +128,9 @@ void BPF_STRUCT_OPS(sampling_folio_added, struct folio *folio)
 
 	update_stat(&STAT_TOTAL_PAGES, 1);
 
-	// Create folio metadata
-	u64 key = (u64)folio;
-	struct folio_metadata new_meta = { .accesses = 1 };
-	bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY);
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (node)
+		node->metadata[0] = 1;
 }
 
 void BPF_STRUCT_OPS(sampling_folio_accessed, struct folio *folio)
@@ -150,43 +138,19 @@ void BPF_STRUCT_OPS(sampling_folio_accessed, struct folio *folio)
 	if (!is_folio_relevant(folio)) {
 		return;
 	}
-	// TODO: Update folio metadata with other values we want to track
-	struct folio_metadata *meta;
-	u64 key = (u64)folio;
-	meta = bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (!meta) {
-		struct folio_metadata new_meta = { 0 };
-		int ret = bpf_map_update_elem(&folio_metadata_map, &key,
-					      &new_meta, BPF_ANY);
-		if (ret != 0) {
-			bpf_printk(
-				"cache_ext: Failed to create folio metadata in accessed. Return value: %d\n",
-				ret);
-			return;
-		}
-		meta = bpf_map_lookup_elem(&folio_metadata_map, &key);
-		if (meta == NULL) {
-			bpf_printk("cache_ext: Failed to get created folio metadata in accessed\n");
-			return;
-		}
-	}
-	__sync_fetch_and_add(&meta->accesses, 1);
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (!node)
+		return;
+	__sync_fetch_and_add(&node->metadata[0], 1);
 }
 
-void BPF_STRUCT_OPS(sampling_folio_evicted, struct folio *folio)
+void BPF_STRUCT_OPS(sampling_folios_evicted, struct cache_ext_evicted_ctx *ectx)
 {
-	dbg_printk(
-		"cache_ext: Hi from the sampling_folio_evicted hook! :D\n");
-	// if (bpf_cache_ext_list_del(folio)) {
-	// 	dbg_printk("cache_ext: Failed to delete folio from sampling_list\n");
-	// 	return;
-	// }
-
-	u64 key = (u64)folio;
-	bpf_map_delete_elem(&folio_metadata_map, &key);
-	update_stat(&STAT_TOTAL_PAGES, -1);
-	update_stat(&STAT_EVICTED_TOTAL_PAGES, 1);
-
+	for (int i = 0; i < (int)ectx->nr_folios && i < 32; i++) {
+		if (!ectx->folios[i]) continue;
+		update_stat(&STAT_TOTAL_PAGES, -1);
+		update_stat(&STAT_EVICTED_TOTAL_PAGES, 1);
+	}
 }
 
 static inline bool is_last_page_in_file(struct folio *folio)
@@ -213,15 +177,7 @@ static inline bool is_last_page_in_file(struct folio *folio)
 
 static s64 bpf_lfu_score_fn(struct cache_ext_list_node *a)
 {
-	s64 score = 0;
-	struct folio_metadata *meta_a;
-	u64 key_a = (u64)a->folio;
-	meta_a = bpf_map_lookup_elem(&folio_metadata_map, &key_a);
-	if (!meta_a) {
-		bpf_printk("cache_ext: Failed to get metadata\n");
-		return INT64_MAX;
-	}
-	score = meta_a->accesses;
+	s64 score = (s64)a->metadata[0];
 	if (APP_TYPE == LEVELDB) {
 		// In leveldb, the index block is at the end of the file.
 		bool is_last_page = is_last_page_in_file(a->folio);
@@ -267,6 +223,6 @@ struct cache_ext_ops sampling_ops = {
 	.init = (void *)sampling_init,
 	.evict_folios = (void *)sampling_evict_folios,
 	.folio_accessed = (void *)sampling_folio_accessed,
-	.folio_evicted = (void *)sampling_folio_evicted,
+	.folios_evicted = (void *)sampling_folios_evicted,
 	.folio_added = (void *)sampling_folio_added,
 };

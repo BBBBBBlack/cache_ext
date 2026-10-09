@@ -125,7 +125,7 @@ struct dispatcher_prog_ids
   __u32 folio_added_id;
   __u32 folio_accessed_id;
   __u32 evict_folios_id;
-  __u32 folios_evicted_id;
+  __u32 folio_evicted_id;
   __u32 trigger_pull_id;
 };
 
@@ -172,17 +172,9 @@ int get_or_create_registry_map()
   return -1;
 }
 
-static __u32 get_prog_id(struct bpf_program* prog)
-{
-  struct bpf_prog_info info = {0};
-  __u32 len = sizeof(info);
-  if (bpf_obj_get_info_by_fd(bpf_program__fd(prog), &info, &len) == 0)
-    return info.id;
-  return 0;
-}
-
 void register_dispatcher(int cgroup_fd, struct a_dispatcher_bpf* skel)
 {
+  // 1. 获取 Cgroup ID (Inode)
   __u64 cgroup_id = get_cgroup_id(cgroup_fd);
   if (cgroup_id == 0)
   {
@@ -190,14 +182,41 @@ void register_dispatcher(int cgroup_fd, struct a_dispatcher_bpf* skel)
     return;
   }
 
-  struct dispatcher_prog_ids ids = {
-      .folio_added_id = get_prog_id(skel->progs._folio_added),
-      .folio_accessed_id = get_prog_id(skel->progs._folio_accessed),
-      .evict_folios_id = get_prog_id(skel->progs._evict_folios),
-      .folios_evicted_id = get_prog_id(skel->progs._folios_evicted),
-      .trigger_pull_id = get_prog_id(skel->progs.trigger_pull),
-  };
+  // 2. 获取 Program ID
 
+  struct dispatcher_prog_ids ids = {0};
+
+  // 获取 folio_added 的 ID
+  struct bpf_prog_info info = {0};
+  __u32 len = sizeof(info);
+  if (bpf_obj_get_info_by_fd(bpf_program__fd(skel->progs._folio_added), &info, &len) == 0)
+    ids.folio_added_id = info.id;
+
+  // 获取 folio_accessed 的 ID
+  memset(&info, 0, sizeof(info));
+  len = sizeof(info);
+  if (bpf_obj_get_info_by_fd(bpf_program__fd(skel->progs._folio_accessed), &info, &len) == 0)
+    ids.folio_accessed_id = info.id;
+
+  // 获取 evict_folios 的 ID
+  memset(&info, 0, sizeof(info));
+  len = sizeof(info);
+  if (bpf_obj_get_info_by_fd(bpf_program__fd(skel->progs._evict_folios), &info, &len) == 0)
+    ids.evict_folios_id = info.id;
+
+  // 获取 folio_evited 的 ID
+  memset(&info, 0, sizeof(info));
+  len = sizeof(info);
+  if (bpf_obj_get_info_by_fd(bpf_program__fd(skel->progs._folio_evicted), &info, &len) == 0)
+    ids.folio_evicted_id = info.id;
+
+  // 获取 trigger_pull 的 ID
+  memset(&info, 0, sizeof(info));
+  len = sizeof(info);
+  if (bpf_obj_get_info_by_fd(bpf_program__fd(skel->progs.trigger_pull), &info, &len) == 0)
+    ids.trigger_pull_id = info.id;
+
+  // 3. 写入注册表
   int map_fd = get_or_create_registry_map();
   if (map_fd < 0)
     return;
@@ -247,18 +266,17 @@ void handle_loader_command(struct a_dispatcher_bpf* skel, struct ipc_msg* msg)
 {
   if (msg->cmd == CMD_MIGRATION_BEGIN)
   {
+    skel->bss->global_ts.high_ghr_streak = 0;
+    skel->bss->global_ts.low_ghr_streak = 0;
+    uint64_t routing_core = ((uint64_t)100 << 32) | PHASE_SLOW_START;
+    __atomic_store_n(&skel->bss->global_ts.routing_core, routing_core, __ATOMIC_RELEASE);
     __atomic_store_n(&skel->bss->enable_secondary_slot, 1, __ATOMIC_RELEASE);
-    printf("[Dispatcher] Received MIGRATION_BEGIN. Dual-rail enabled.\n");
+    printf("[Dispatcher] Received MIGRATION_BEGIN. phase=%u p=%u\n",
+           skel->bss->global_ts.phase, skel->bss->global_ts.p);
   }
   else if (msg->cmd == CMD_MIGRATION_COMPLETE)
   {
     printf("[Dispatcher] Received MIGRATION_COMPLETE. Migration finished.\n");
-  }
-  else if (msg->cmd == CMD_MIGRATION_FINALIZE)
-  {
-    __atomic_store_n(&skel->bss->active_slot_id, 2, __ATOMIC_RELEASE);
-    __atomic_store_n(&skel->bss->enable_secondary_slot, 0, __ATOMIC_RELEASE);
-    printf("[Dispatcher] Finalized: slot2 is now primary, dual-rail disabled.\n");
   }
 }
 
@@ -293,9 +311,24 @@ static int handle_bpf_dispatcher_command(void* ctx, void* data, size_t data_sz)
     return 0;
 
   struct migration_status_event* event = data;
-  if (event->phase == PHASE_END && !ring_ctx->notified)
+  if (event->phase != PHASE_COMPLETE && event->p != ring_ctx->last_progress_p)
+  {
+    ring_ctx->last_progress_p = event->p;
+    struct ipc_msg msg = {.cmd = CMD_MIGRATION_PROGRESS, .p = event->p};
+    if (send_ipc_message(LOADER_CONTROL_SOCKET_PATH, ring_ctx->cgroup_id, &msg) == 0)
+      printf("[Dispatcher] Forwarded progress %u to loader.\n", event->p);
+  }
+
+  if (event->phase == PHASE_COMPLETE && !ring_ctx->notified)
   {
     ring_ctx->notified = true;
+    if (event->p != ring_ctx->last_progress_p)
+    {
+      ring_ctx->last_progress_p = event->p;
+      struct ipc_msg progress_msg = {.cmd = CMD_MIGRATION_PROGRESS, .p = event->p};
+      send_ipc_message(LOADER_CONTROL_SOCKET_PATH, ring_ctx->cgroup_id, &progress_msg);
+    }
+
     struct ipc_msg complete_msg = {.cmd = CMD_MIGRATION_COMPLETE, .p = 0};
     if (send_ipc_message(LOADER_CONTROL_SOCKET_PATH, ring_ctx->cgroup_id, &complete_msg) == 0)
       printf("[Dispatcher] Forwarded COMPLETE event to loader.\n");
@@ -380,7 +413,7 @@ static int dispatcher_command_server_step(struct dispatcher_server* server,
                                           struct a_dispatcher_bpf* skel)
 {
   struct epoll_event events[MAX_EVENTS];
-  int n = epoll_wait(server->ipc.epoll_fd, events, MAX_EVENTS, 10000);
+  int n = epoll_wait(server->ipc.epoll_fd, events, MAX_EVENTS, -1);
   if (n < 0)
   {
     if (errno == EINTR)
@@ -405,6 +438,7 @@ static int dispatcher_command_server_step(struct dispatcher_server* server,
         return -1;
     }
   }
+
   return 0;
 }
 
@@ -421,13 +455,6 @@ int run_command_server(int cgroup_fd, struct a_dispatcher_bpf* skel)
   {
     if (dispatcher_command_server_step(&server, skel) < 0)
       continue;
-    printf("[Dispatcher] folio_added=%lu evict=%lu slot=%u dual=%d stub1=%lu\n",
-           skel->bss->dispatcher_folio_added_count,
-           skel->bss->dispatcher_evict_count,
-           skel->bss->active_slot_id,
-           skel->bss->enable_secondary_slot,
-           skel->bss->stub_folio_added1_count);
-    fflush(stdout);
   }
 
   destroy_dispatcher_command_server(&server);

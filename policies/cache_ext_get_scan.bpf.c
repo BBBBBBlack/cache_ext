@@ -49,19 +49,6 @@ static inline bool is_scanning_pid() {
 
 #define MAX_PAGES (1 << 20)
 
-struct folio_metadata {
-	u64 accesses;
-	u64 last_access_time;
-	bool touched_by_scan;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, __u64);
-	__type(value, struct folio_metadata);
-	__uint(max_entries, 4000000);
-} folio_metadata_map SEC(".maps");
-
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -212,14 +199,13 @@ void BPF_STRUCT_OPS(mixed_folio_added, struct folio *folio)
 		update_stat(&STAT_INSERTED_SCAN_PAGES, 1);
 	}
 
-	// Create folio metadata
-	u64 key = (u64)folio;
-	struct folio_metadata new_meta = {
-		.accesses = 1,
-		.touched_by_scan = touched_by_scan,
-		.last_access_time = bpf_ktime_get_ns(),
-	};
-	bpf_map_update_elem(&folio_metadata_map, &key, &new_meta, BPF_ANY);
+	// Write initial metadata into the list node
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (node) {
+		node->metadata[0] = 1; // accesses = 1
+		u64 now = bpf_ktime_get_ns();
+		node->metadata[1] = (now & ~(1ULL << 63)) | ((u64)touched_by_scan << 63);
+	}
 }
 
 void BPF_STRUCT_OPS(mixed_folio_accessed, struct folio *folio)
@@ -227,81 +213,41 @@ void BPF_STRUCT_OPS(mixed_folio_accessed, struct folio *folio)
 	if (!is_folio_relevant(folio)) {
 		return;
 	}
-	// TODO: Update folio metadata with other values we want to track
-	struct folio_metadata *meta;
-	u64 key = (u64)folio;
-	meta = bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (!meta) {
-        // If metadata does not exist, try to add it
-		struct folio_metadata new_meta = { 0 };
-		int ret = bpf_map_update_elem(&folio_metadata_map, &key,
-					      &new_meta, BPF_ANY);
-		if (ret != 0) {
-			bpf_printk(
-				"cache_ext: Failed to create folio metadata in accessed. Return value: %d\n",
-				ret);
-			return;
-		}
-		meta = bpf_map_lookup_elem(&folio_metadata_map, &key);
-		if (meta == NULL) {
-			bpf_printk("cache_ext: Failed to get created folio metadata in accessed\n");
-			return;
-		}
+	struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+	if (!node) {
+		bpf_printk("cache_ext: Failed to get node in folio_accessed\n");
+		return;
 	}
-    // bool touched_by_scan = is_scanning_pid();
-	// If the page was inserted by a scan but then accessed by a non-scan,
-	// move it to the general list.
-    // if (meta->touched_by_scan && !touched_by_scan){
-    //     // Update stat
-    //     update_stat(&STAT_SCAN_PAGES, -1);
-	//     meta->touched_by_nonscan = !touched_by_scan;
-    //     // Change list
-    //     u64 sampling_list = get_sampling_list(LIST_GENERAL);
-    //     if (sampling_list == 0) {
-    //         bpf_printk("cache_ext: Failed to get sampling_list\n");
-    //         return;
-    //     }
-    //     bpf_cache_ext_list_del(folio);
-    //     bpf_cache_ext_list_add(sampling_list, folio);
-    // }
 
 	update_stat(&STAT_ACCESSED_TOTAL_PAGES, 1);
-	if (meta->touched_by_scan) {
+	bool touched_by_scan = (node->metadata[1] >> 63) & 1;
+	if (touched_by_scan) {
 		update_stat(&STAT_ACCESSED_SCAN_PAGES, 1);
 	}
-	__sync_fetch_and_add(&meta->accesses, 1);
-	meta->last_access_time = bpf_ktime_get_ns();
-	// meta->touched_by_scan = touched_by_scan;
+	__sync_fetch_and_add(&node->metadata[0], 1);
+	u64 now = bpf_ktime_get_ns();
+	node->metadata[1] = (now & ~(1ULL << 63)) | ((u64)touched_by_scan << 63);
 }
 
-void BPF_STRUCT_OPS(mixed_folio_evicted, struct folio *folio)
+void BPF_STRUCT_OPS(mixed_folios_evicted, struct cache_ext_evicted_ctx *ectx)
 {
-	dbg_printk(
-		"cache_ext: Hi from the mixed_folio_evicted hook! :D\n");
-	int ret = bpf_cache_ext_list_del(folio);
-	if (ret != 0) {
-		bpf_printk("cache_ext: Failed to delete folio from list: %d\n",
-			   ret);
-	}
+	for (int i = 0; i < (int)ectx->nr_folios && i < 32; i++) {
+		struct folio *folio = ectx->folios[i];
+		if (!folio) continue;
 
-	u64 key = (u64)folio;
-	bool touched_by_scan = false;
-	struct folio_metadata *meta = bpf_map_lookup_elem(&folio_metadata_map, &key);
-	if (meta) {
-		touched_by_scan = meta->touched_by_scan;
-	} else {
-		bpf_printk("cache_ext: Failed to get metadata for evicted folio\n");
-	}
-	bpf_map_delete_elem(&folio_metadata_map, &key);
-	// Update stats
-	if (touched_by_scan) {
-		__sync_fetch_and_sub(&scan_pages, 1);
-		//update_stat(&STAT_SCAN_PAGES, -1);
-		update_stat(&STAT_EVICTED_SCAN_PAGES, 1);
-	}
-	update_stat(&STAT_TOTAL_PAGES, -1);
-	update_stat(&STAT_EVICTED_TOTAL_PAGES, 1);
+		bool touched_by_scan = false;
+		struct cache_ext_list_node *node = bpf_cache_ext_folio_to_node(folio);
+		if (node)
+			touched_by_scan = (node->metadata[1] >> 63) & 1;
 
+		bpf_cache_ext_list_del(folio);
+		if (touched_by_scan) {
+			__sync_fetch_and_sub(&scan_pages, 1);
+			update_stat(&STAT_EVICTED_SCAN_PAGES, 1);
+		}
+		update_stat(&STAT_TOTAL_PAGES, -1);
+		update_stat(&STAT_EVICTED_TOTAL_PAGES, 1);
+	}
 }
 
 static inline bool is_last_page_in_file(struct folio *folio)
@@ -328,18 +274,7 @@ static inline bool is_last_page_in_file(struct folio *folio)
 
 static s64 bpf_lfu_score_fn(struct cache_ext_list_node *a)
 {
-	s64 score = 0;
-	struct folio_metadata *meta_a;
-	u64 key_a = (u64)a->folio;
-	meta_a = bpf_map_lookup_elem(&folio_metadata_map, &key_a);
-	if (!meta_a) {
-		bpf_printk("cache_ext: Failed to get metadata\n");
-		return INT64_MAX;
-	}
-	// if (!meta_a->touched_by_scan) {
-	// 	bpf_printk("cache_ext: Found page not in scan in score_fn\n");
-	// }
-	score = meta_a->accesses;
+	s64 score = (s64)a->metadata[0]; // accesses
 	// In leveldb, the index block is at the end of the file.
 	bool is_last_page = is_last_page_in_file(a->folio);
 	if (is_last_page) {
@@ -398,6 +333,6 @@ struct cache_ext_ops sampling_ops = {
 	.init = (void *)mixed_init,
 	.evict_folios = (void *)mixed_evict_folios,
 	.folio_accessed = (void *)mixed_folio_accessed,
-	.folio_evicted = (void *)mixed_folio_evicted,
+	.folios_evicted = (void *)mixed_folios_evicted,
 	.folio_added = (void *)mixed_folio_added,
 };

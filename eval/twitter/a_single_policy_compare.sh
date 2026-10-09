@@ -17,8 +17,12 @@ cleanup_bg() {
     restore_readahead 2>/dev/null || true
 
     # First try the PIDs captured from the background sudo commands.
-    sudo kill -2 ${LOADER_PID:-0} 2>/dev/null || true
-    sudo kill -2 ${DISPATCHER_PID:-0} 2>/dev/null || true
+    if [ -n "${LOADER_PID:-}" ]; then
+        sudo kill -2 "$LOADER_PID" 2>/dev/null || true
+    fi
+    if [ -n "${DISPATCHER_PID:-}" ]; then
+        sudo kill -2 "$DISPATCHER_PID" 2>/dev/null || true
+    fi
     sleep 2
 
     # Fallback: $! may be the sudo wrapper PID, and the actual loader/dispatcher
@@ -37,10 +41,8 @@ cleanup_bg() {
         stty "$ORIG_STTY" 2>/dev/null || true
     fi
 }
-trap cleanup_bg EXIT
-
 usage() {
-    echo "用法: $0 <cluster> <policy> [cgroup_size] [limit-nr-op|ignore-nr-op] [test_memory=true|false] [memory_interval=<seconds>] [test_perf=true|false] [runtime=<seconds>] [warmup=<seconds>] [cache_ext_cgroup=<name>] [baseline_cgroup=<name>] [disable_readahead=true|false] [readahead_kb=<default|N>] [skip_baseline=true|false]"
+    echo "用法: $0 <cluster> <policy> [cgroup_size] [limit-nr-op|ignore-nr-op] [test_memory=true|false] [memory_interval=<seconds>] [perf_mode=none|record|tracepoint|both] [test_perf=true|false] [results_dir=<path>] [runtime=<seconds>] [warmup=<seconds>] [cache_ext_cgroup=<name>] [baseline_cgroup=<name>] [disable_readahead=true|false] [readahead_kb=<default|N>] [skip_baseline=true|false]"
     echo ""
     echo "  cluster:      Twitter trace cluster 编号，如 17, 18, 24, 34, 52"
     echo ""
@@ -51,9 +53,14 @@ usage() {
     echo "  ignore-nr-op: 默认值，忽略 nr_op/nr_warmup_op，只按 runtime_seconds 或 trace EOF 停止"
     echo "  limit-nr-op:  Twitter bench 到 nr_op 或 runtime_seconds 任一条件满足即停止"
     echo ""
-    echo "  test_memory:  默认 false；true 时按 memory_interval 采样对应 cgroup 的 memory.stat、memory.pressure 和 io.stat"
+    echo "  test_memory: 默认 false；开启内存/IO统计；默认保留30秒对齐快照和吞吐"
+    echo "  memory_poll: auto（默认，避免重复采样）|true（额外独立采样）|false；独立采样还需 test_memory=true"
     echo "  memory_interval: 默认 5 秒；test_memory=true 时生效"
-    echo "  test_perf:    默认 false；true 时每阶段在 warmup 之后 attach run_leveldb 进程 perf record -g 60 秒，并采样 page-cache add/readahead tracepoint"
+    echo "  perf_mode:    none=关闭 perf 监测；record=仅调用栈；tracepoint=仅 page-cache 事件计数；both=两者开启"
+    echo "                record 采样 60 秒，tracepoint 计数 runtime 秒；均从发现进程后等待 warmup 秒开始"
+    echo "                none 不影响独立的 test_memory 或 readahead 设置"
+    echo "  test_perf:    兼容参数；true=both，false=none（默认）；显式 perf_mode 优先，不受参数顺序影响"
+    echo "  results_dir: 默认 results；JSON 和所有监测日志按模式区分，另保留不带模式的最新 JSON 副本"
     echo ""
     echo "  runtime:      默认 240；写入 bench YAML 的 workload.runtime_seconds"
     echo "  warmup:       默认 45；写入 bench YAML 的 workload.warmup_runtime_seconds"
@@ -72,6 +79,8 @@ usage() {
     echo "  $0 17 lfu 64M test_memory=true"
     echo "  $0 17 lfu 64M test_memory=true memory_interval=2"
     echo "  $0 17 lfu 64M test_memory=true test_perf=true"
+    echo "  $0 34 s3fifo 3G perf_mode=record test_memory=true runtime=3600"
+    echo "  $0 34 s3fifo 3G perf_mode=tracepoint results_dir=/tmp/twitter-tracepoint"
     echo "  $0 17 lfu 64M runtime=500 warmup=60"
     echo "  $0 17 lfu 64M cache_ext_cgroup=cache_ext_test_a baseline_cgroup=baseline_test_a"
     echo "  $0 34 s3fifo 3G test_memory=true disable_readahead=true"
@@ -102,7 +111,9 @@ POLICY_NAME="$2"
 CGROUP_SIZE=""
 TRACE_NR_OP_MODE="ignore-nr-op"
 TEST_MEMORY=false
+MEMORY_POLL="${MEMORY_POLL:-auto}"
 TEST_PERF=false
+PERF_MODE=""
 MEMORY_SAMPLE_INTERVAL=5
 RUNTIME_SECONDS=240
 WARMUP_RUNTIME_SECONDS=45
@@ -113,6 +124,9 @@ READAHEAD_KB="default"
 SKIP_BASELINE=false
 for arg in "${@:3}"; do
     case "$arg" in
+        test_leveldb_io=*|sst_sample_every=*|diagnostic_*=*)
+            echo "[Error] Retired diagnostics option: $arg; use test_memory=true" >&2; usage ;;
+        memory_poll=*) MEMORY_POLL="${arg#*=}" ;;
         limit-nr-op|ignore-nr-op)
             TRACE_NR_OP_MODE="$arg"
             ;;
@@ -163,6 +177,23 @@ for arg in "${@:3}"; do
         test_perf=false|--no-test-perf)
             TEST_PERF=false
             ;;
+        perf_mode=*)
+            PERF_MODE="${arg#*=}"
+            case "$PERF_MODE" in
+                none|record|tracepoint|both) ;;
+                *)
+                    echo "[Error] perf_mode 必须是 none、record、tracepoint 或 both: $arg"
+                    usage
+                    ;;
+            esac
+            ;;
+        results_dir=*)
+            if [ -z "${arg#*=}" ]; then
+                echo "[Error] results_dir 不能为空"
+                usage
+            fi
+            RESULTS_PATH=$(realpath -m -- "${arg#*=}")
+            ;;
         disable_readahead|disable_readahead=true|--disable-readahead)
             DISABLE_READAHEAD=true
             ;;
@@ -194,7 +225,26 @@ for arg in "${@:3}"; do
     esac
 done
 
+if [ -z "$PERF_MODE" ]; then
+    if [ "$TEST_PERF" = "true" ]; then
+        PERF_MODE=both
+    else
+        PERF_MODE=none
+    fi
+fi
+TEST_PERF_RECORD=false
+TEST_TRACEPOINT=false
+case "$PERF_MODE" in
+    record) TEST_PERF_RECORD=true ;;
+    tracepoint) TEST_TRACEPOINT=true ;;
+    both) TEST_PERF_RECORD=true; TEST_TRACEPOINT=true ;;
+esac
+RUN_MODE_TAG="$PERF_MODE"
+
 ITERATIONS=1
+source "$BASE_DIR/eval/leveldb_io_monitor.sh"
+resolve_memory_poll
+check_leveldb_io_binary
 BENCHMARK="twitter_cluster${CLUSTER}_bench"
 DB_PATH="$DB_DIRS/data/leveldb_twitter_cluster${CLUSTER}_db"
 TRACES_DIR="$DB_DIRS/data/twitter/traces"
@@ -285,7 +335,8 @@ if [ "$DISABLE_READAHEAD" = "true" ]; then
 elif [ "$READAHEAD_KB" != "default" ]; then
     CGROUP_SIZE_TAG="${CGROUP_SIZE_TAG}_ra${READAHEAD_KB}KB"
 fi
-RESULT_FILE="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}.json"
+LEGACY_RESULT_FILE="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}.json"
+RESULT_FILE="${LEGACY_RESULT_FILE%.json}_${RUN_MODE_TAG}.json"
 
 echo "[Info] Twitter cluster: $CLUSTER"
 echo "[Info] 所选 cache_ext 策略: $POLICY_NAME"
@@ -295,9 +346,10 @@ echo "[Info] warmup_runtime_seconds: $WARMUP_RUNTIME_SECONDS"
 echo "[Info] cache_ext cgroup: $CACHE_EXT_CGROUP_NAME"
 echo "[Info] baseline cgroup: $BASELINE_CGROUP_NAME"
 echo "[Info] memory/io 采样: $TEST_MEMORY"
-echo "[Info] memory/io 采样间隔: ${MEMORY_SAMPLE_INTERVAL}s"
-echo "[Info] perf record 采样: $TEST_PERF"
-echo "[Info] page-cache tracepoint 采样: $TEST_PERF"
+echo "[Info] Independent memory polling: $MEMORY_POLL_ENABLED (memory_poll=$MEMORY_POLL, interval=${MEMORY_SAMPLE_INTERVAL}s); Benchmark aligned snapshots: $TEST_MEMORY (30s)"
+echo "[Info] perf mode: $PERF_MODE"
+echo "[Info] perf record 采样: $TEST_PERF_RECORD"
+echo "[Info] page-cache tracepoint 采样: $TEST_TRACEPOINT"
 echo "[Info] 禁用块设备 readahead: $DISABLE_READAHEAD"
 echo "[Info] 块设备 readahead_kb: $READAHEAD_KB"
 echo "[Info] 跳过 baseline: $SKIP_BASELINE"
@@ -367,11 +419,15 @@ start_memory_monitor() {
     local stage="$1"
     local cgroup_name="$2"
     local cgroup_path="/sys/fs/cgroup/$cgroup_name"
-    local log_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_mem_${stage}.log"
+    local log_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_mem_${RUN_MODE_TAG}_${stage}.log"
+    local throughput_log="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_throughput_${RUN_MODE_TAG}_${stage}.log"
 
     stop_memory_monitor 2>/dev/null || true
 
-    if [ "$TEST_MEMORY" != "true" ]; then
+    if [ "$MEMORY_POLL_ENABLED" != "true" ]; then
+        echo "[Info] Independent memory polling disabled: stage=$stage; Benchmark snapshots=$TEST_MEMORY"
+        # Replace a stale log, so a rerun cannot be mistaken for old 5s samples.
+        echo "# disabled: memory_poll=$MEMORY_POLL test_memory=$TEST_MEMORY snapshots=$TEST_MEMORY; use leveldb_io JSONL/io_windows CSV" > "$log_file"
         return 0
     fi
 
@@ -383,7 +439,9 @@ start_memory_monitor() {
         echo "# cgroup=$cgroup_name"
         echo "# cgroup_path=$cgroup_path"
         echo "# interval_seconds=$MEMORY_SAMPLE_INTERVAL"
-        echo "# fields: timestamp memory.current selected memory.stat memory.pressure io.stat"
+        echo "# throughput_log=$throughput_log"
+        echo "# fields: timestamp memory.current selected memory.stat memory.pressure io.stat cache_ext_reclaim.stat"
+        echo "# cache_ext_reclaim.stat: local cgroup cumulative counters; *_pages in PAGE_SIZE units; keep_* are exclusive reasons; use interval deltas"
         while true; do
             if [ -d "$cgroup_path" ]; then
                 echo "timestamp $(date '+%F %T')"
@@ -408,6 +466,11 @@ start_memory_monitor() {
                 else
                     echo "io.stat missing"
                 fi
+                if [ -f "$cgroup_path/memory.cache_ext_reclaim_stat" ]; then
+                    sed 's/^/cache_ext_reclaim.stat /' "$cgroup_path/memory.cache_ext_reclaim_stat" || true
+                else
+                    echo "cache_ext_reclaim.stat unavailable"
+                fi
                 echo
             else
                 echo "timestamp $(date '+%F %T')"
@@ -428,14 +491,74 @@ stop_memory_monitor() {
     fi
 }
 
+run_benchmark_with_throughput() {
+    local stage="$1"
+    shift
+
+    if [ "$TEST_MEMORY" = true ]; then
+        run_with_leveldb_io "$stage" \
+            "$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}" \
+            "$RUN_MODE_TAG" "$@"
+        return
+    fi
+
+    if [ "$TEST_MEMORY" != "true" ]; then
+        "${BASE_CMD[@]}" "$@"
+        return
+    fi
+
+    local log_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_throughput_${RUN_MODE_TAG}_${stage}.log"
+    echo "[Info] 每 30 秒 Trace 吞吐日志: $log_file"
+
+    # My-YCSB reports a 10-second interval throughput at each Trace epoch.
+    # Aggregate three successive measurement epochs; exclude warmup and epoch 0.
+    PYTHONUNBUFFERED=1 "${BASE_CMD[@]}" "$@" 2>&1 | awk -v log_file="$log_file" -v stage="$stage" '
+        BEGIN {
+            print "# stage=" stage > log_file
+            print "# fields: timestamp stage elapsed_seconds interval_seconds throughput_ops_s" >> log_file
+            print "# three consecutive 10-second Trace reports per 30-second window; warmup and epoch 0 excluded" >> log_file
+            fflush(log_file)
+        }
+        {
+            print
+            fflush()
+            if ($0 !~ /^Trace \(epoch [0-9]+,/ || index($0, "total throughput ") == 0)
+                next
+
+            epoch = $0
+            sub(/^Trace \(epoch /, "", epoch)
+            sub(/,.*/, "", epoch)
+            if (epoch !~ /^[0-9]+$/ || epoch == 0)
+                next
+
+            throughput = $0
+            sub(/^.*total throughput /, "", throughput)
+            sub(/ ops\/sec.*$/, "", throughput)
+            if (throughput !~ /^[0-9]+([.][0-9]+)?$/)
+                next
+
+            sum += throughput
+            count++
+            if (count == 3) {
+                "date -u +%Y-%m-%dT%H:%M:%SZ" | getline timestamp
+                close("date -u +%Y-%m-%dT%H:%M:%SZ")
+                printf "timestamp=%s stage=%s elapsed_seconds=%d interval_seconds=30 throughput_ops_s=%.2f\n", timestamp, stage, epoch * 10, sum / 3 >> log_file
+                fflush(log_file)
+                sum = 0
+                count = 0
+            }
+        }
+    '
+}
+
 start_pcache_monitor() {
     local stage="$1"
     local cgroup_name="$2"
-    local log_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_pcache_${stage}.log"
+    local log_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_pcache_${RUN_MODE_TAG}_${stage}.log"
 
     stop_pcache_monitor 2>/dev/null || true
 
-    if [ "$TEST_PERF" != "true" ]; then
+    if [ "$TEST_TRACEPOINT" != "true" ]; then
         return 0
     fi
 
@@ -449,7 +572,8 @@ start_pcache_monitor() {
         echo "# start_delay_seconds=$WARMUP_RUNTIME_SECONDS"
         echo "# duration_seconds=$RUNTIME_SECONDS"
         echo "# events=$PCACHE_EVENTS"
-        echo "# note: add_to_page_cache counts page-cache insertions/refills; prefetch counts readahead insertions; demand_miss_estimate ~= add_to_page_cache - prefetch"
+        echo "# note: raw event counts only; add includes write allocations, and readahead may include the demanded page. add-prefetch is NOT a demand-miss count."
+        echo "# scope: PID-attached perf window, not the phase-aligned LevelDB/cgroup window; do not normalize by whole-run ops."
         echo "# command: sleep $WARMUP_RUNTIME_SECONDS; perf stat -x, -e $PCACHE_EVENTS -p <run_leveldb_pid> -- sleep $RUNTIME_SECONDS"
 
         local pid=""
@@ -512,12 +636,12 @@ find_run_leveldb_pid_for_cgroup() {
 start_perf_monitor() {
     local stage="$1"
     local cgroup_name="$2"
-    local log_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_perf_${stage}.log"
-    local data_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_perf_${stage}.data"
+    local log_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_perf_${RUN_MODE_TAG}_${stage}.log"
+    local data_file="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_perf_${RUN_MODE_TAG}_${stage}.data"
 
     stop_perf_monitor 2>/dev/null || true
 
-    if [ "$TEST_PERF" != "true" ]; then
+    if [ "$TEST_PERF_RECORD" != "true" ]; then
         return 0
     fi
 
@@ -587,266 +711,7 @@ stop_perf_monitor() {
     fi
 }
 
-append_validation_summary() {
-    if [ "$TEST_MEMORY" != "true" ] || [ "$TEST_PERF" != "true" ]; then
-        return 0
-    fi
-
-    local validation_log="$RESULTS_PATH/twitter_spc_${POLICY_NAME}_cluster${CLUSTER}_${CGROUP_SIZE_TAG}_validation.log"
-
-    python3 - "$RESULT_FILE" "$RESULTS_PATH" "$POLICY_NAME" "$CLUSTER" "$CGROUP_SIZE_TAG" "$RUNTIME_SECONDS" "$validation_log" <<'PY'
-import json
-import os
-import re
-import sys
-
-result_file, results_path, policy, cluster, cgroup_tag, runtime_s, validation_log = sys.argv[1:]
-runtime_s = float(runtime_s)
-
-stages = ["baseline", f"direct_{policy}", f"dispatcher_{policy}"]
-
-def parse_mem_log(path):
-    blocks = []
-    block = None
-
-    if not os.path.exists(path):
-        return None
-
-    with open(path, errors="ignore") as f:
-        for raw in f:
-            line = raw.strip()
-            if line.startswith("timestamp "):
-                if block is not None:
-                    blocks.append(block)
-                block = {"io": {}, "mem": {}}
-                continue
-            if block is None:
-                continue
-            if line.startswith("memory.current "):
-                parts = line.split()
-                if len(parts) == 2 and parts[1].isdigit():
-                    block["mem"]["memory.current"] = int(parts[1])
-                continue
-            if line.startswith("io.stat "):
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                dev = parts[1]
-                entry = {}
-                for p in parts[2:]:
-                    if "=" not in p:
-                        continue
-                    k, v = p.split("=", 1)
-                    if v.isdigit():
-                        entry[k] = int(v)
-                if entry:
-                    block["io"][dev] = entry
-                continue
-            parts = line.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                block["mem"][parts[0]] = int(parts[1])
-
-    if block is not None:
-        blocks.append(block)
-
-    # The monitor can start before cgroup creation and can also sample after the
-    # benchmark has already cleaned the cgroup. Those samples have no real
-    # memory/io values; using them as first/last makes deltas become zero.
-    blocks = [b for b in blocks if "memory.current" in b["mem"]]
-
-    if len(blocks) < 2:
-        return None
-
-    first, last = blocks[0], blocks[-1]
-    io_blocks = [b for b in blocks if b.get("io")]
-    first_io = io_blocks[0] if io_blocks else {}
-    last_io = io_blocks[-1] if io_blocks else {}
-
-    def io_delta_for_dev(dev, key):
-        first_val = first_io.get("io", {}).get(dev, {}).get(key, 0)
-        last_val = last_io.get("io", {}).get(dev, {}).get(key, 0)
-        return max(0, last_val - first_val)
-
-    # cgroup v2 io.stat can expose stacked devices, e.g. dm-* and the backing
-    # nvme device. Summing all rows double-counts. Pick one stable non-unknown
-    # device with the largest read+write delta and record it in the summary.
-    common_devs = set(first_io.get("io", {})) & set(last_io.get("io", {}))
-    numeric_devs = [d for d in common_devs if re.fullmatch(r"[0-9]+:[0-9]+", d)]
-    # Prefer a non-device-mapper backing device when present. On this setup
-    # io.stat exposes both dm-* (major 253) and the backing nvme partition; using
-    # dm in one stage and nvme in another makes cross-stage comparison invalid.
-    non_dm_numeric_devs = [d for d in numeric_devs if not d.startswith("253:")]
-    candidate_devs = non_dm_numeric_devs or numeric_devs or sorted(common_devs)
-    io_device = None
-    if candidate_devs:
-        io_device = max(
-            candidate_devs,
-            key=lambda d: (
-                io_delta_for_dev(d, "rbytes") + io_delta_for_dev(d, "wbytes"),
-                io_delta_for_dev(d, "rios") + io_delta_for_dev(d, "wios"),
-                d,
-            ),
-        )
-
-    out = {
-        "samples": len(blocks),
-        "io_samples": len(io_blocks),
-        "io_device": io_device or "unavailable",
-        "rbytes_delta": io_delta_for_dev(io_device, "rbytes") if io_device else 0,
-        "wbytes_delta": io_delta_for_dev(io_device, "wbytes") if io_device else 0,
-        "rios_delta": io_delta_for_dev(io_device, "rios") if io_device else 0,
-        "wios_delta": io_delta_for_dev(io_device, "wios") if io_device else 0,
-        "pgscan_delta": max(0, last["mem"].get("pgscan", 0) - first["mem"].get("pgscan", 0)),
-        "pgsteal_delta": max(0, last["mem"].get("pgsteal", 0) - first["mem"].get("pgsteal", 0)),
-        "memory_current_max": max(b["mem"].get("memory.current", 0) for b in blocks),
-        "file_dirty_max": max(b["mem"].get("file_dirty", 0) for b in blocks),
-        "file_writeback_max": max(b["mem"].get("file_writeback", 0) for b in blocks),
-    }
-    return out
-
-def parse_pcache_log(path):
-    out = {
-        "add_to_page_cache": None,
-        "readahead_prefetch": None,
-        "demand_miss_estimate": None,
-        "perf_stat_ok": False,
-    }
-    if not os.path.exists(path):
-        return out
-
-    with open(path, errors="ignore") as f:
-        for raw in f:
-            line = raw.strip()
-            if "not supported" in line or "unknown tracepoint" in line or "event syntax error" in line:
-                out["error"] = line
-            parts = line.split(",")
-            if len(parts) < 3:
-                continue
-            count = parts[0].strip().replace(",", "")
-            event = parts[2].strip()
-            if not re.fullmatch(r"[0-9]+", count):
-                continue
-            val = int(count)
-            if event.endswith("mm_filemap_add_to_page_cache"):
-                out["add_to_page_cache"] = val
-                out["perf_stat_ok"] = True
-            elif event.endswith("mm_filemap_add_to_page_cache_prefetch"):
-                out["readahead_prefetch"] = val
-                out["perf_stat_ok"] = True
-
-    if out["add_to_page_cache"] is not None and out["readahead_prefetch"] is not None:
-        out["demand_miss_estimate"] = max(0, out["add_to_page_cache"] - out["readahead_prefetch"])
-    return out
-
-def fmt_bytes(v):
-    return f"{v / (1024 ** 3):.3f} GiB"
-
-try:
-    with open(result_file) as f:
-        results = json.load(f)
-except FileNotFoundError:
-    results = []
-
-rows = []
-for idx, stage in enumerate(stages):
-    mem_log = os.path.join(results_path, f"twitter_spc_{policy}_cluster{cluster}_{cgroup_tag}_mem_{stage}.log")
-    pcache_log = os.path.join(results_path, f"twitter_spc_{policy}_cluster{cluster}_{cgroup_tag}_pcache_{stage}.log")
-    mem = parse_mem_log(mem_log)
-    pcache = parse_pcache_log(pcache_log)
-    bench = results[idx]["results"] if idx < len(results) else {}
-    throughput = float(bench.get("throughput_avg", 0) or 0)
-    ops = throughput * runtime_s
-
-    row = {
-        "stage": stage,
-        "throughput_ops_s": throughput,
-        "estimated_ops": ops,
-        "mem": mem,
-        "pcache": pcache,
-    }
-    rows.append(row)
-
-    summary_lines = []
-    summary_lines.append("")
-    summary_lines.append("===== validation summary: normalized IO per op =====")
-    summary_lines.append(f"throughput_ops_s {throughput:.2f}")
-    summary_lines.append(f"runtime_seconds {runtime_s:.0f}")
-    summary_lines.append(f"estimated_ops {ops:.0f}")
-    if mem and ops > 0:
-        summary_lines.append(f"io_device {mem['io_device']}")
-        summary_lines.append(f"read_bytes_delta {mem['rbytes_delta']}")
-        summary_lines.append(f"write_bytes_delta {mem['wbytes_delta']}")
-        summary_lines.append(f"read_ios_delta {mem['rios_delta']}")
-        summary_lines.append(f"write_ios_delta {mem['wios_delta']}")
-        summary_lines.append(f"read_bytes_per_op {mem['rbytes_delta'] / ops:.3f}")
-        summary_lines.append(f"write_bytes_per_op {mem['wbytes_delta'] / ops:.3f}")
-        summary_lines.append(f"read_ios_per_kop {mem['rios_delta'] / ops * 1000:.6f}")
-        summary_lines.append(f"write_ios_per_kop {mem['wios_delta'] / ops * 1000:.6f}")
-        summary_lines.append(f"pgscan_per_kop {mem['pgscan_delta'] / ops * 1000:.6f}")
-        summary_lines.append(f"pgsteal_per_kop {mem['pgsteal_delta'] / ops * 1000:.6f}")
-    else:
-        summary_lines.append("normalized_io unavailable")
-    summary_lines.append("===== end validation summary =====")
-    if os.path.exists(mem_log):
-        with open(mem_log, "a") as f:
-            f.write("\n".join(summary_lines) + "\n")
-
-    pcache_lines = []
-    pcache_lines.append("")
-    pcache_lines.append("===== validation summary: page-cache tracepoints =====")
-    pcache_lines.append(f"throughput_ops_s {throughput:.2f}")
-    pcache_lines.append(f"runtime_seconds {runtime_s:.0f}")
-    pcache_lines.append(f"estimated_ops {ops:.0f}")
-    for key in ["add_to_page_cache", "readahead_prefetch", "demand_miss_estimate"]:
-        val = pcache.get(key)
-        pcache_lines.append(f"{key} {val if val is not None else 'unavailable'}")
-        if val is not None and ops > 0:
-            pcache_lines.append(f"{key}_per_kop {val / ops * 1000:.6f}")
-    if pcache.get("error"):
-        pcache_lines.append(f"error {pcache['error']}")
-    pcache_lines.append("===== end validation summary =====")
-    if os.path.exists(pcache_log):
-        with open(pcache_log, "a") as f:
-            f.write("\n".join(pcache_lines) + "\n")
-
-with open(validation_log, "w") as f:
-    f.write("# cache_ext validation summary\n")
-    f.write(f"# result_file={result_file}\n")
-    f.write(f"# runtime_seconds={runtime_s:.0f}\n")
-    f.write("# caveat: io.stat may include stacked block devices; use same-method relative comparison unless device is filtered.\n\n")
-    for row in rows:
-        stage = row["stage"]
-        ops = row["estimated_ops"]
-        mem = row["mem"]
-        pc = row["pcache"]
-        f.write(f"[{stage}]\n")
-        f.write(f"throughput_ops_s={row['throughput_ops_s']:.2f}\n")
-        f.write(f"estimated_ops={ops:.0f}\n")
-        if mem and ops > 0:
-            f.write(f"io_device={mem['io_device']}\n")
-            f.write(f"read_io={fmt_bytes(mem['rbytes_delta'])}\n")
-            f.write(f"write_io={fmt_bytes(mem['wbytes_delta'])}\n")
-            f.write(f"read_bytes_per_op={mem['rbytes_delta'] / ops:.3f}\n")
-            f.write(f"write_bytes_per_op={mem['wbytes_delta'] / ops:.3f}\n")
-            f.write(f"read_ios_per_kop={mem['rios_delta'] / ops * 1000:.6f}\n")
-            f.write(f"write_ios_per_kop={mem['wios_delta'] / ops * 1000:.6f}\n")
-            f.write(f"pgscan_per_kop={mem['pgscan_delta'] / ops * 1000:.6f}\n")
-            f.write(f"pgsteal_per_kop={mem['pgsteal_delta'] / ops * 1000:.6f}\n")
-        else:
-            f.write("normalized_io=unavailable\n")
-        for key in ["add_to_page_cache", "readahead_prefetch", "demand_miss_estimate"]:
-            val = pc.get(key)
-            f.write(f"{key}={val if val is not None else 'unavailable'}\n")
-            if val is not None and ops > 0:
-                f.write(f"{key}_per_kop={val / ops * 1000:.6f}\n")
-        if pc.get("error"):
-            f.write(f"pcache_error={pc['error']}\n")
-        f.write("\n")
-
-print(f"[Done] validation summary written: {validation_log}")
-PY
-}
-
+# Phase-aligned io_windows CSV replaces the old estimated_ops validation summary.
 # Disable MGLRU
 if ! "$BASE_DIR/utils/disable-mglru.sh"; then
     echo "Failed to disable MGLRU. Please check the script."
@@ -900,7 +765,7 @@ else
     start_memory_monitor "baseline" "$BASELINE_CGROUP_NAME"
     start_pcache_monitor "baseline" "$BASELINE_CGROUP_NAME"
     start_perf_monitor "baseline" "$BASELINE_CGROUP_NAME"
-    "${BASE_CMD[@]}" --default-only --policy-loader ""
+    run_benchmark_with_throughput "baseline" --default-only --policy-loader ""
     stop_perf_monitor
     stop_pcache_monitor
     stop_memory_monitor
@@ -915,7 +780,7 @@ echo "--------------------------------------------------------"
 start_memory_monitor "direct_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
 start_pcache_monitor "direct_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
 start_perf_monitor "direct_${POLICY_NAME}" "$CACHE_EXT_CGROUP_NAME"
-"${BASE_CMD[@]}" --policy-loader "$POLICY_PATH/cache_ext_${POLICY_NAME}.out"
+run_benchmark_with_throughput "direct_${POLICY_NAME}" --policy-loader "$POLICY_PATH/cache_ext_${POLICY_NAME}.out"
 stop_perf_monitor
 stop_pcache_monitor
 stop_memory_monitor
@@ -951,8 +816,6 @@ stop_memory_monitor
 # stop_pcache_monitor
 # stop_memory_monitor
 
-# append_validation_summary
-
 # echo "[Info] 压测结束，清理 Dispatcher 和 Loader 后台进程..."
 # sudo kill -2 $LOADER_PID 2>/dev/null || true
 # sleep 2
@@ -986,6 +849,32 @@ for cgroup_name in "${CACHE_EXT_CGROUP_NAME:-}" "${BASELINE_CGROUP_NAME:-}"; do
     fi
 done
 
+python3 - "$RESULT_FILE" "$PERF_MODE" "$TEST_MEMORY" "$MEMORY_SAMPLE_INTERVAL" "$MEMORY_POLL" "$MEMORY_POLL_ENABLED" <<'PY'
+import json
+import sys
+
+path, mode, test_memory, memory_interval, memory_poll, memory_poll_enabled = sys.argv[1:]
+with open(path) as f:
+    runs = json.load(f)
+for run in runs:
+    run["config"].update(
+        perf_mode=mode,
+        test_memory_snapshots=test_memory == "true",
+        test_perf_record=mode in ("record", "both"),
+        test_tracepoint=mode in ("tracepoint", "both"),
+        test_memory=test_memory == "true",
+        memory_interval_seconds=int(memory_interval),
+        memory_poll=memory_poll,
+        memory_poll_enabled=memory_poll_enabled == "true",
+    )
+with open(path, "w") as f:
+    json.dump(runs, f, indent=4)
+    f.write("\n")
+PY
+
+# Retain the latest-result path used by existing callers.
+cp -f -- "$RESULT_FILE" "$LEGACY_RESULT_FILE"
+
 echo "Benchmark completed!"
-echo "3组对比数据 (Baseline / $POLICY_NAME / Dispatcher+$POLICY_NAME) 已保存至:"
+echo "对比数据 (perf_mode=$PERF_MODE) 已保存至:"
 echo "-> $RESULT_FILE"

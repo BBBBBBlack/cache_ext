@@ -14,9 +14,9 @@ char __license[] SEC("license") = "GPL";
 
 #define ENOENT 2 /* include/uapi/asm-generic/errno-base.h */
 #define INT64_MAX (9223372036854775807LL)
-#define S3FIFO_DIRTY_FREQ_PENALTY 1LL
 
-static u64 cache_size_pages = 0;
+#define CACHE_SIZE (((1ull << 20) * 200) / 4096)
+const volatile size_t cache_size = 0;
 
 static volatile const u64 secret = 0x9876543210;
 
@@ -24,11 +24,25 @@ static volatile const u64 secret = 0x9876543210;
  * ****************************************** MAP *******************************************
  */
 
+struct folio_metadata
+{
+  s64 freq;
+  bool in_main;
+};
+
 struct ghost_entry
 {
   u64 address_space;
   u64 offset;
 };
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __type(key, u64);
+  __type(value, struct folio_metadata);
+  __uint(max_entries, 4000000);
+} folio_metadata_map SEC(".maps");
 
 struct
 {
@@ -39,6 +53,26 @@ struct
   __uint(map_flags, BPF_F_NO_COMMON_LRU); // Per-CPU LRU eviction logic
 } ghost_map SEC(".maps");
 
+static __always_inline struct folio_metadata* get_folio_metadata(struct folio* folio)
+{
+  u64 key = (u64)folio;
+
+  struct cache_ext_val_buffer* ptr = bpf_cache_ext_map_lookup(
+      (struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
+
+  return (struct folio_metadata*)ptr;
+}
+
+static __always_inline int set_folio_metadata(struct folio* folio, struct folio_metadata* data)
+{
+  u64 key = (u64)folio;
+
+  // 调用底层的 kfunc，把栈上的 data 内存安全地覆盖到 Map 里
+  return bpf_cache_ext_map_update((struct bpf_map*)&folio_metadata_map,
+                                  &key, sizeof(key),
+                                  data, sizeof(*data));
+}
+
 static inline bool folio_in_ghost(struct folio* folio)
 {
   if (!folio->mapping)
@@ -48,7 +82,9 @@ static inline bool folio_in_ghost(struct folio* folio)
       .address_space = (u64)folio->mapping->host,
       .offset = folio->index,
   };
-  return bpf_map_delete_elem(&ghost_map, &key) == 0;
+  // TODO: handle non-ENOENT errors
+  // 返回 0 为成功
+  return bpf_cache_ext_map_delete((struct bpf_map*)&ghost_map, &key, sizeof(key)) == 0;
 }
 
 /**
@@ -80,8 +116,6 @@ static __always_inline int ensure_initialized_by_memcg(struct mem_cgroup* memcg)
     return 0;
   u64 tmp_main_list = bpf_cache_ext_ds_registry_new_list(memcg);
   u64 tmp_small_list = bpf_cache_ext_ds_registry_new_list(memcg);
-  if (cache_size_pages == 0 && memcg)
-    cache_size_pages = memcg->memory.max;
   return ensure_initialized_impl(tmp_main_list, tmp_small_list);
 }
 
@@ -91,12 +125,6 @@ static __always_inline int ensure_initialized_by_folio(struct folio* folio)
     return 0;
   u64 tmp_main_list = bpf_cache_ext_ds_registry_new_list_from_folio(folio);
   u64 tmp_small_list = bpf_cache_ext_ds_registry_new_list_from_folio(folio);
-  if (cache_size_pages == 0 && folio)
-  {
-    struct mem_cgroup* memcg = bpf_cache_ext_folio_to_memcg(folio);
-    if (memcg)
-      cache_size_pages = memcg->memory.max;
-  }
   return ensure_initialized_impl(tmp_main_list, tmp_small_list);
 }
 
@@ -117,7 +145,6 @@ int do_targeted_init(struct bpf_iter__cgroup* ctx)
   bpf_printk("S3FIFO Loader Init\n");
   main_list = bpf_cache_ext_ds_registry_new_list(memcg);
   small_list = bpf_cache_ext_ds_registry_new_list(memcg);
-  cache_size_pages = memcg->memory.max;
 
   return 0;
 }
@@ -254,6 +281,9 @@ u64 s3fifo_pop(void)
   if (__sync_fetch_and_sub(&main_list_size, 1) <= 0)
     main_list_size = 0;
 
+  u64 key = (u64)folio;
+  bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
+
   return bpf_cache_ext_folio_to_handle(folio, secret);
 }
 
@@ -267,18 +297,26 @@ int s3fifo_push(u64 handle)
   if (ensure_initialized_by_folio(f) < 0)
     return 0;
 
+  u64 key = (u64)f;
+  struct folio_metadata new_meta = {0};
+  u64 list_to_add;
+
   // 清理 ghost，迁移页面统一保送 main_list。
   folio_in_ghost(f);
+  new_meta.freq = 3;
+  new_meta.in_main = true;
+  list_to_add = main_list;
 
-  int ret = bpf_cache_ext_list_add_tail(main_list, f);
+  if (bpf_map_update_elem((struct bpf_map*)&folio_metadata_map, &key,
+                          &new_meta, BPF_NOEXIST))
+    return 0;
+
+  int ret = bpf_cache_ext_list_add_tail(list_to_add, f);
   if (ret)
+  {
+    bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
     return 0;
-
-  struct cache_ext_list_node* node = bpf_cache_ext_folio_to_node(f);
-  if (!node)
-    return 0;
-  node->metadata[0] = 3;
-  node->metadata[1] = 1;
+  }
 
   __sync_fetch_and_add(&main_list_size, 1);
   return 1;
@@ -287,23 +325,28 @@ int s3fifo_push(u64 handle)
 
 static int bpf_s3fifo_score_small_fn(int idx, struct cache_ext_list_node* a)
 {
-  if (!folio_test_uptodate(a->folio) || !folio_test_lru(a->folio) ||
-      folio_test_writeback(a->folio))
+  if (!folio_test_uptodate(a->folio) || !folio_test_lru(a->folio))
+    return CACHE_EXT_CONTINUE_ITER;
+
+  if (folio_test_dirty(a->folio) || folio_test_writeback(a->folio))
+    return CACHE_EXT_CONTINUE_ITER;
+  struct folio_metadata* data = get_folio_metadata(a->folio);
+  if (!data)
   {
-    /* evict_small moves every CONTINUE node to main, including these
-     * temporarily ineligible folios. Match folios_evicted accounting.
-     */
-    a->metadata[1] = 1;
+    // bpf_printk("cache_ext: score_fn: Failed to get metadata\n");
     return CACHE_EXT_CONTINUE_ITER;
   }
-
   // Move to main list if freq > 1
-  s64 freq = (s64)a->metadata[0];
-  if (folio_test_dirty(a->folio))
-    freq += S3FIFO_DIRTY_FREQ_PENALTY;
-  if (freq > 1)
+  if (data->freq > 1)
   {
-    a->metadata[1] = 1;
+    // struct folio_metadata new_data = *data;
+    // new_data.in_main = true;
+    // set_folio_metadata(a->folio, &new_data);
+
+    u64 key_val = (u64)a->folio;
+    bpf_cache_ext_map_set_bool(
+        (struct bpf_map*)&folio_metadata_map, &key_val, sizeof(key_val),
+        __builtin_offsetof(struct folio_metadata, in_main), true);
     return CACHE_EXT_CONTINUE_ITER;
   }
   // Else, evict
@@ -343,13 +386,18 @@ static void evict_small(struct cache_ext_eviction_ctx* eviction_ctx, struct mem_
   static int bpf_s3fifo_score_main_iter_fn_##id(int idx, struct cache_ext_list_node* a) \
   {                                                                                     \
     if (!folio_test_uptodate(a->folio) || !folio_test_lru(a->folio) ||                  \
-        folio_test_writeback(a->folio))                                                 \
-      return CACHE_EXT_RETRY_LATER;                                                     \
+        folio_test_dirty(a->folio) || folio_test_writeback(a->folio))                   \
+      return CACHE_EXT_CONTINUE_ITER;                                                   \
                                                                                         \
-    s64 freq = __sync_sub_and_fetch(&a->metadata[0], 1);                                \
-    if (folio_test_dirty(a->folio))                                                      \
-      freq += S3FIFO_DIRTY_FREQ_PENALTY;                                                \
-    if (freq < id)                                                                      \
+    u64 key = (u64)a->folio;                                                            \
+    s64 new_freq = bpf_cache_ext_map_dec(                                               \
+        (struct bpf_map*)&folio_metadata_map, &key, sizeof(key),                        \
+        __builtin_offsetof(struct folio_metadata, freq), 0);                            \
+                                                                                        \
+    if (new_freq < 0)                                                                   \
+      return CACHE_EXT_CONTINUE_ITER;                                                   \
+    if (new_freq < id)                                                                  \
+      /*data->freq = 0;*/                                                               \
       return CACHE_EXT_EVICT_NODE;                                                      \
                                                                                         \
     return CACHE_EXT_CONTINUE_ITER;                                                     \
@@ -372,8 +420,6 @@ static void evict_main_iter(struct cache_ext_eviction_ctx* eviction_ctx, struct 
       .continue_mode = CACHE_EXT_ITERATE_TAIL,
       .evict_list = CACHE_EXT_ITERATE_SELF,
       .evict_mode = CACHE_EXT_ITERATE_TAIL,
-      .retry_list = CACHE_EXT_ITERATE_SELF,
-      .retry_mode = CACHE_EXT_ITERATE_TAIL,
       .deferred_list = CACHE_EXT_ITERATE_SELF,
       .deferred_mode = CACHE_EXT_ITERATE_TAIL,
   };
@@ -428,7 +474,7 @@ int s3fifo_evict_folios(u64 eviction_ctx_handle, u64 memcg_handle)
 
   if (ensure_initialized_by_memcg(memcg) < 0)
     return -1;
-  if (small_list_size >= (s64)(cache_size_pages / 15) || main_list_size <= 2 * small_list_size)
+  if (small_list_size >= cache_size / 15 || main_list_size <= 2 * small_list_size)
     evict_small(eviction_ctx, memcg);
   else
     evict_main_iter(eviction_ctx, memcg);
@@ -438,58 +484,62 @@ int s3fifo_evict_folios(u64 eviction_ctx_handle, u64 memcg_handle)
 SEC("freplace/slot_folio_accessed1")
 int s3fifo_folio_accessed(u64 handle)
 {
+
   struct folio* folio = bpf_cache_ext_handle_to_folio(handle, secret);
   if (!folio)
     return -1;
   if (ensure_initialized_by_folio(folio) < 0)
     return -1;
 
-  struct cache_ext_list_node* node = bpf_cache_ext_folio_to_node(folio);
-  if (!node)
+  // Cap frequency at 3
+  u64 key = (u64)folio;
+  if (bpf_cache_ext_map_inc((struct bpf_map*)&folio_metadata_map, &key, sizeof(key),
+                            __builtin_offsetof(struct folio_metadata, freq), 3) < 0)
     return -1;
-
-  if (__sync_add_and_fetch(&node->metadata[0], 1) > 3)
-    node->metadata[0] = 3;
-
+  // if (__sync_add_and_fetch(&data->freq, 1) > 3)
+  //   data->freq = 3;
   return 0;
 }
 
 u64 call_count = 0;
-u64 evict_count = 0;
 
-SEC("freplace/slot_folios_evicted1")
-int s3fifo_folios_evicted(u64 ctx_handle)
+SEC("freplace/slot_folio_evicted1")
+int s3fifo_folio_evicted(u64 handle)
 {
-  struct cache_ext_evicted_ctx* ctx =
-      bpf_cache_ext_handle_to_evicted_ctx(ctx_handle, secret);
-  if (!ctx)
+  struct folio* folio = bpf_cache_ext_handle_to_folio(handle, secret);
+  if (!folio)
+    return -1;
+  if (ensure_initialized_by_folio(folio) < 0)
     return -1;
 
-  for (int i = 0; i < (int)ctx->nr_folios && i < 32; i++)
-  {
-    struct folio* folio = ctx->folios[i];
-    if (!folio)
-      continue;
-    if (ensure_initialized_by_folio(folio) < 0)
-      continue;
+  u64 key = (u64)folio;
+  u8 ghost_val = 0;
 
-    u8 ghost_val = 0;
+  // if (bpf_cache_ext_list_del(folio)) {
+  // 	bpf_printk("cache_ext: Failed to delete folio from sampling_list\n");
+  // 	return;
+  // }
+  struct ghost_entry ghost_key = {
+      .address_space = (u64)folio->mapping->host,
+      .offset = folio->index,
+  };
+  // Don't return early, we want to delete the folio metadata regardless
+  bpf_cache_ext_map_update((struct bpf_map*)&ghost_map,
+                           &ghost_key, sizeof(ghost_key),
+                           &ghost_val, sizeof(ghost_val));
 
-    struct ghost_entry ghost_key = {
-        .address_space = (u64)folio->mapping->host,
-        .offset = folio->index,
-    };
-    bpf_map_update_elem(&ghost_map, &ghost_key, &ghost_val, BPF_ANY);
+  struct folio_metadata* data = get_folio_metadata(folio);
+  if (!data)
+    // bpf_printk("cache_ext: evicted: Failed to get metadata\n");
+    return -1;
 
-    struct cache_ext_list_node* node = bpf_cache_ext_folio_to_node(folio);
-    if (!node)
-      continue;
+  if (data->in_main)
+    __sync_fetch_and_sub(&main_list_size, 1);
+  else
+    __sync_fetch_and_sub(&small_list_size, 1);
 
-    if (node->metadata[1])  // in_main
-      __sync_fetch_and_sub(&main_list_size, 1);
-    else
-      __sync_fetch_and_sub(&small_list_size, 1);
-  }
+  bpf_cache_ext_map_delete((struct bpf_map*)&folio_metadata_map, &key, sizeof(key));
+
   return 0;
 }
 
@@ -503,27 +553,41 @@ int s3fifo_folio_added(u64 handle)
   if (ensure_initialized_by_folio(folio) < 0)
     return -1;
 
+  u64 key = (u64)folio;
+  struct folio_metadata new_meta = {
+      .freq = 0,
+  };
+
   u64 list_to_add;
   bool is_main = false;
 
   if (folio_in_ghost(folio))
   {
     list_to_add = main_list;
+    new_meta.in_main = true;
     is_main = true;
   }
   else
   {
     list_to_add = small_list;
+    new_meta.in_main = false;
   }
 
   if (bpf_cache_ext_list_add_tail(list_to_add, folio))
+  {
+    // TODO: add back to ghost_map?
+    // bpf_printk("cache_ext: added: Failed to add folio to main_list\n");
     return -1;
+  }
 
-  struct cache_ext_list_node* node = bpf_cache_ext_folio_to_node(folio);
-  if (!node)
+  if (bpf_cache_ext_map_update((struct bpf_map*)&folio_metadata_map, &key, sizeof(key),
+                               &new_meta, sizeof(new_meta)))
+  {
+    // TODO: add back to ghost_map? + error check delete call?
+    bpf_cache_ext_list_del(folio);
+    // bpf_printk("cache_ext: added: Failed to create folio metadata\n");
     return -1;
-  node->metadata[0] = 0;
-  node->metadata[1] = is_main ? 1 : 0;
+  }
 
   if (is_main)
     __sync_fetch_and_add(&main_list_size, 1);

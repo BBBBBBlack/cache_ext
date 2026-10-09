@@ -8,7 +8,12 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+typedef uint64_t u64;
+typedef int64_t s64;
+typedef uint32_t u32;
 
 #include "dir_watcher.h"
 #include "cache_ext_s3fifo.skel.h"
@@ -27,12 +32,48 @@ static struct argp_option options[] = {
 	{ 0 },
 };
 
-static const uint64_t page_size = 4096;
+static const uint64_t s3fifo_ghost_map_entries = 4000000;
 
 static volatile sig_atomic_t exiting;
 
 static void sig_handler(int signo) {
 	exiting = 1;
+}
+
+static void print_accounting_stats(struct cache_ext_s3fifo_bpf *skel,
+                                   const char *phase)
+{
+	struct timespec mono, real;
+	if (!skel || !skel->bss)
+		return;
+	clock_gettime(CLOCK_MONOTONIC, &mono);
+	clock_gettime(CLOCK_REALTIME, &real);
+	/* Independent relaxed snapshots, not a transaction across fields. */
+#define SNAP(field) __atomic_load_n(&skel->bss->field, __ATOMIC_RELAXED)
+	unsigned long long list_missing = SNAP(diag_add_fail_list_missing);
+	unsigned long long node_invalid = SNAP(diag_add_fail_node_invalid);
+	unsigned long long already_linked = SNAP(diag_add_fail_already_linked);
+	unsigned long long other = SNAP(diag_add_fail_other);
+	/* Derived only in userspace: no second atomic increment per failure. */
+	unsigned long long add_fail_total = list_missing + node_invalid + already_linked + other;
+	printf("[S3FIFO accounting] revision=6 phase=%s mono_ns=%llu unix_ns=%llu marker_mask=%u "
+	       "small=%lld main=%lld "
+	       "add_fail_total=%llu pre_add_node_missing=%llu accessed_node_missing=%llu "
+	       "add_fail_list_missing=%llu add_fail_node_invalid=%llu "
+	       "add_fail_already_linked=%llu add_fail_other=%llu "
+	       "small_negative_updates=%llu main_negative_updates=%llu\n",
+	       phase, (unsigned long long)mono.tv_sec * 1000000000ULL + mono.tv_nsec,
+	       (unsigned long long)real.tv_sec * 1000000000ULL + real.tv_nsec,
+	       SNAP(admission_tracking_mask),
+	       (long long)SNAP(small_list_size), (long long)SNAP(main_list_size),
+	       add_fail_total,
+	       (unsigned long long)SNAP(diag_pre_add_node_missing),
+	       (unsigned long long)SNAP(diag_accessed_node_missing),
+	       list_missing, node_invalid, already_linked, other,
+	       (unsigned long long)SNAP(diag_small_negative_updates),
+	       (unsigned long long)SNAP(diag_main_negative_updates));
+#undef SNAP
+	fflush(stdout);
 }
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state)
@@ -127,7 +168,7 @@ int main(int argc, char **argv) {
 	sa.sa_handler = sig_handler;
 
 	// Install signal handler
-	if (sigaction(SIGINT, &sa, NULL)) {
+	if (sigaction(SIGINT, &sa, NULL) || sigaction(SIGTERM, &sa, NULL)) {
 		perror("Failed to set up signal handling");
 		return 1;
 	}
@@ -148,13 +189,12 @@ int main(int argc, char **argv) {
 		goto cleanup;
 	}
 
-	// Set cache size in terms of number of pages. Assumes uniform page size.
-	skel->rodata->cache_size = args.cgroup_size / page_size;
 	fprintf(stderr, "Cgroup size: %lu bytes\n", args.cgroup_size);
-	fprintf(stderr, "Cache size: %lu pages\n", skel->rodata->cache_size);
+	fprintf(stderr, "S3FIFO ghost_map max_entries: %lu\n", s3fifo_ghost_map_entries);
 
-	// Resize ghost_map
-	if (bpf_map__set_max_entries(skel->maps.ghost_map, skel->rodata->cache_size)) {
+	// Resize ghost_map. Keep this aligned with dispatcher S3FIFO so direct
+	// and dispatcher runs use the same ghost-history capacity.
+	if (bpf_map__set_max_entries(skel->maps.ghost_map, s3fifo_ghost_map_entries)) {
 		perror("Failed to resize ghost_map");
 		ret = 1;
 		goto cleanup;
@@ -190,9 +230,14 @@ int main(int argc, char **argv) {
 		goto cleanup;
 	}
 
-	// Wait for keyboard input
-	printf("Press any key to exit...\n");
-	getchar();
+	printf("Press Ctrl-C to exit; accounting snapshots every 30s.\n");
+	print_accounting_stats(skel, "start");
+	while (!exiting) {
+		sleep(30);
+		if (!exiting)
+			print_accounting_stats(skel, "periodic");
+	}
+	print_accounting_stats(skel, "final");
 	ret = 0;
 
 cleanup:

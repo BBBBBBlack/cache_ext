@@ -111,6 +111,10 @@ static __always_inline void __write_once_size(volatile void* p, void* res, int s
 //   u8 raw_data[64];
 // } __attribute__((preserve_access_index));
 
+/* Admission: 0 on success; -ENOENT for missing target list, -ESTALE for
+ * invalid node, -EEXIST for already-linked node, -EINVAL for NULL arguments.
+ * Older kernels return -1 without distinguishing the cause.
+ */
 int bpf_cache_ext_list_add(u64 list, struct folio* folio) __ksym;
 int bpf_cache_ext_list_add_tail(u64 list, struct folio* folio) __ksym;
 int bpf_cache_ext_list_del(struct folio* folio) __ksym;
@@ -130,6 +134,10 @@ int bpf_cache_ext_list_sample(struct mem_cgroup* memcg, u64 list,
                               s64(score_fn)(struct cache_ext_list_node* a),
                               struct sampling_options* opts,
                               struct cache_ext_eviction_ctx* ctx) __ksym;
+int bpf_cache_ext_list_sample_extended(struct mem_cgroup* memcg, u64 list,
+                                       s64(score_fn)(struct cache_ext_list_node* a),
+                                       struct cache_ext_sample_opts* opts,
+                                       struct cache_ext_eviction_ctx* ctx) __ksym;
 u64 bpf_cache_ext_ds_registry_new_list(struct mem_cgroup* memcg) __ksym;
 u64 bpf_cache_ext_ds_registry_new_list_from_folio(struct folio* folio) __ksym;
 
@@ -139,8 +147,16 @@ u64 bpf_cache_ext_ctx_to_handle(struct cache_ext_eviction_ctx* ctx, u64 secret_k
 struct folio* bpf_cache_ext_handle_to_folio(u64 handle, u64 secret_key) __ksym;
 struct mem_cgroup* bpf_cache_ext_handle_to_memcg(u64 handle, u64 secret_key) __ksym;
 struct cache_ext_eviction_ctx* bpf_cache_ext_handle_to_ctx(u64 handle, u64 secret_key) __ksym;
+u64 bpf_cache_ext_evicted_ctx_to_handle(struct cache_ext_evicted_ctx* ctx, u64 secret_key) __ksym;
+struct cache_ext_evicted_ctx* bpf_cache_ext_handle_to_evicted_ctx(u64 handle, u64 secret_key) __ksym;
 struct mem_cgroup* bpf_cgroup_to_memcg(struct cgroup* cgrp) __ksym;
 struct mem_cgroup* bpf_cache_ext_folio_to_memcg(struct folio* folio) __ksym;
+struct cache_ext_list_node* bpf_cache_ext_folio_to_node(struct folio* folio) __ksym;
+u32 bpf_cache_ext_admission_tracking_mask(void) __ksym;
+int bpf_cache_ext_folio_set_metadata(struct folio* folio, void* data, u32 data__sz) __ksym;
+u64 bpf_cache_ext_folio_add_metadata(struct folio* folio, u32 idx, u64 val) __ksym;
+int bpf_cache_ext_node_set_metadata(struct cache_ext_list_node* node, void* data, u32 data__sz) __ksym;
+u64 bpf_cache_ext_node_add_metadata(struct cache_ext_list_node* node, u32 idx, u64 val) __ksym;
 int bpf_cache_ext_map_update(struct bpf_map* map,
                              void* key, u32 key__sz, void* value, u32 value__sz) __ksym;
 int bpf_cache_ext_map_delete(struct bpf_map* map, void* key, u32 key__sz) __ksym;
@@ -160,21 +176,21 @@ long long bpf_cache_ext_map_dec(struct bpf_map* map, void* key, u32 key__sz,
 typedef struct generic_cache_metrics_uapi generic_cache_metrics;
 typedef struct migration_qstate_uapi migration_qstate;
 
-struct
-{
-  __uint(type, BPF_MAP_TYPE_ARRAY);
-  __uint(max_entries, MIGRATION_Q_SIZE);
-  __type(key, u32);
-  __type(value, generic_cache_metrics);
-} migration_queue SEC(".maps");
+// struct
+// {
+//   __uint(type, BPF_MAP_TYPE_ARRAY);
+//   __uint(max_entries, MIGRATION_Q_SIZE);
+//   __type(key, u32);
+//   __type(value, generic_cache_metrics);
+// } migration_queue SEC(".maps");
 
-struct
-{
-  __uint(type, BPF_MAP_TYPE_ARRAY);
-  __uint(max_entries, 1);
-  __type(key, u32);
-  __type(value, migration_qstate);
-} migration_qstate_map SEC(".maps");
+// struct
+// {
+//   __uint(type, BPF_MAP_TYPE_ARRAY);
+//   __uint(max_entries, 1);
+//   __type(key, u32);
+//   __type(value, migration_qstate);
+// } migration_qstate_map SEC(".maps");
 
 #define BITS_PER_LONG 64
 #define BIT_MASK(nr) (UL(1) << ((nr) % BITS_PER_LONG))

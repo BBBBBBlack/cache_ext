@@ -3,7 +3,7 @@
 CLANG ?= clang
 BPFTOOL ?= /usr/local/sbin/bpftool #../../tools/bpf/bpftool/bpftool
 CFLAGS = -O2 -target bpf -mcpu=v3 -D__TARGET_ARCH_$(ARCH) -c -g -Wall
-USERSPACE_CFLAGS = -O2 -fsanitize=address -g -Wall -I/home/czf/cache_ext/linux/include/uapi -I/home/czf/cache_ext/linux/include
+USERSPACE_CFLAGS = -O2 -fsanitize=address -g -Wall -Wno-cpp -I/root/cache_ext/linux/include/uapi -I/root/cache_ext/linux/include
 USERSPACE_LINKER_FLAGS = -L/usr/local/lib64 -lbpf
 
 # Define the BPF program source and the output object file
@@ -34,7 +34,7 @@ CLANG_BPF_SYS_INCLUDES ?= $(shell $(CLANG) -v -E - </dev/null 2>&1 \
 
 
 all: 	cache_ext_mru.out cache_ext_mglru.out cache_ext_fifo.out \
-		cache_ext_sampling.out cache_ext_get_scan.out cache_ext_s3fifo.out \
+		cache_ext_lfu.out cache_ext_get_scan.out cache_ext_s3fifo.out \
 		cache_ext_lhd.out a_dispatcher.out  \
 		a_user_loader.out \
 		# cache_ext_debug.out cache_ext_simple.out
@@ -61,5 +61,5 @@ clean:
 
 .PHONY: all clean
 
-a_user_loader.out: a_user_loader.c a_communication.c a_fifo_policy.skel.h a_s3fifo_policy.skel.h
+a_user_loader.out: a_user_loader.c a_communication.c a_arc_policy.skel.h a_fifo_policy.skel.h a_s3fifo_policy.skel.h a_lfu_policy.skel.h a_lru_policy.skel.h
 	$(CLANG) $(USERSPACE_CFLAGS) a_user_loader.c a_communication.c -o $@ $(USERSPACE_LINKER_FLAGS)

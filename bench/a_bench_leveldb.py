@@ -127,6 +127,8 @@ class LevelDBBenchmark(BenchmarkFramework):
             CLEANUP_TASKS.append(lambda: self.cache_ext_policy.stop())
 
     def add_arguments(self, parser: argparse.ArgumentParser):
+        parser.add_argument("--leveldb-io-log", default=None,
+                            help="New per-stage completed-op and cgroup snapshot JSONL path")
         parser.add_argument(
             "--leveldb-db",
             type=str,
@@ -211,6 +213,11 @@ class LevelDBBenchmark(BenchmarkFramework):
         configs = add_config_option(
             "iteration", list(range(1, self.args.iterations + 1)), configs
         )
+        configs = add_config_option("test_memory_snapshots", [bool(self.args.leveldb_io_log)], configs)
+        if self.args.leveldb_io_log:
+            if len(configs) != 1:
+                raise ValueError("--leveldb-io-log requires a single benchmark configuration")
+            configs = add_config_option("leveldb_io_log", [os.path.abspath(self.args.leveldb_io_log)], configs)
         return configs
 
     def benchmark_prepare(self, config):
@@ -261,6 +268,11 @@ class LevelDBBenchmark(BenchmarkFramework):
             bench_binary,
             bench_file,
         ]
+        if self.args.leveldb_io_log:
+            if self.args.iterations != 1:
+                raise ValueError("--leveldb-io-log requires one iteration per invocation")
+            cmd += ["--io-log", os.path.abspath(self.args.leveldb_io_log),
+                    "--io-cgroup", f"/sys/fs/cgroup/{config['cgroup_name']}"]
         return cmd
 
     def cmd_extra_envs(self, config):
